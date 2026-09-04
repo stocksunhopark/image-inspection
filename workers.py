@@ -14,11 +14,18 @@ class ExcelLoadWorker(QObject):
     progress = pyqtSignal(int, int, str)
     status = pyqtSignal(str)
 
-    def __init__(self, path_ref: str, path_a: str, path_b: Optional[str] = None):
+    def __init__(
+        self,
+        path_ref: str,
+        path_a: str,
+        path_b: Optional[str] = None,
+        path_c: Optional[str] = None,
+    ):
         super().__init__()
         self.path_ref = path_ref
         self.path_a = path_a
         self.path_b = path_b
+        self.path_c = path_c
         self._stop_event = threading.Event()
 
     def request_stop(self) -> None:
@@ -33,16 +40,24 @@ class ExcelLoadWorker(QObject):
                 self.path_ref,
                 self.path_a,
                 self.path_b,
+                self.path_c,
                 progress_cb=lambda current, total, cell: self.progress.emit(
                     current, total, cell
                 ),
                 status_cb=self.status.emit,
                 cancel_cb=self.is_cancelled,
             )
-            mode = "triple" if self.path_b else "double"
+            if self.path_c:
+                mode = "quadra"
+            elif self.path_b:
+                mode = "triple"
+            else:
+                mode = "double"
             paths = {"ref": self.path_ref, "a": self.path_a}
             if self.path_b:
                 paths["b"] = self.path_b
+            if self.path_c:
+                paths["c"] = self.path_c
             self.finished.emit((items_by_sheet, preview_dir, mode, paths))
         except InterruptedError:
             self.failed.emit("사용자 취소")

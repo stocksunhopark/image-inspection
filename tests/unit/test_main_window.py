@@ -110,7 +110,7 @@ def test_triple_shows_third_image_and_marks_input_mode_change(
     window = _window(tmp_path, monkeypatch)
     try:
         window.show()
-        window.triple_radio.setChecked(True)
+        window.triple_check.setChecked(True)
         window.state.set_items(
             {1: [item]},
             mode="triple",
@@ -128,9 +128,85 @@ def test_triple_shows_third_image_and_marks_input_mode_change(
         assert not window.b_container.isHidden()
         assert window.b_image.pixmap() is not None
 
-        window.double_radio.setChecked(True)
+        window.double_check.setChecked(True)
         assert "현재 화면은 이전 Triple 결과" in window.status_label.text()
         assert not window.b_container.isHidden()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_quadra_shows_fourth_image(qapp, tmp_path, monkeypatch):
+    ref_path = _png(tmp_path / "ref.png", (200, 20, 20))
+    a_path = _png(tmp_path / "a.png", (20, 200, 20))
+    b_path = _png(tmp_path / "b.png", (20, 20, 200))
+    c_path = _png(tmp_path / "c.png", (200, 200, 20))
+    item = InspectionItem(
+        1,
+        1,
+        _extracted(ref_path, sheet_index=1, sheet_name="MAIN", cell="A1"),
+        _extracted(a_path, sheet_index=1, sheet_name="MAIN", cell="A1"),
+        _extracted(b_path, sheet_index=1, sheet_name="MAIN", cell="A1"),
+        _extracted(c_path, sheet_index=1, sheet_name="MAIN", cell="A1"),
+    )
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        window.quadra_check.setChecked(True)
+        window.state.set_items(
+            {1: [item]},
+            mode="quadra",
+            workbook_paths={
+                "ref": "ref.xlsx",
+                "a": "a.xlsx",
+                "b": "b.xlsx",
+                "c": "c.xlsx",
+            },
+        )
+        window._populate_sheet_combo()
+        window._render_current()
+        qapp.processEvents()
+
+        assert window.current_mode_label.text() == "현재 결과: Quadra"
+        assert not window.b_container.isHidden()
+        assert not window.c_container.isHidden()
+        assert window.c_image.pixmap() is not None
+        assert not window.b_row.isHidden()
+        assert not window.c_row.isHidden()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_mode_checkboxes_are_exclusive(qapp, tmp_path, monkeypatch):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        assert window.double_check.isChecked()
+        assert not window.triple_check.isChecked()
+        assert not window.quadra_check.isChecked()
+        assert window.b_row.isHidden()
+        assert window.c_row.isHidden()
+
+        window.triple_check.setChecked(True)
+        assert window.triple_check.isChecked()
+        assert not window.double_check.isChecked()
+        assert not window.quadra_check.isChecked()
+        assert not window.b_row.isHidden()
+        assert window.c_row.isHidden()
+
+        window.quadra_check.setChecked(True)
+        assert window.quadra_check.isChecked()
+        assert not window.double_check.isChecked()
+        assert not window.triple_check.isChecked()
+        assert not window.b_row.isHidden()
+        assert not window.c_row.isHidden()
+
+        window.quadra_check.setChecked(False)
+        assert window.quadra_check.isChecked()
+        assert not window.double_check.isChecked()
+        assert not window.triple_check.isChecked()
+        assert window._selected_mode() == "quadra"
     finally:
         window.close()
         window.deleteLater()

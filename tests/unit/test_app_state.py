@@ -36,14 +36,17 @@ def _item(
     cell: str,
     *,
     triple: bool = False,
+    quadra: bool = False,
 ) -> InspectionItem:
     row = index - 1
+    extra = triple or quadra
     return InspectionItem(
         sheet_index=sheet_index,
         index=index,
         image_ref=_image(sheet_index, cell, row, 0),
         image_a=_image(sheet_index, cell, row, 0),
-        image_b=_image(sheet_index, cell, row, 0) if triple else None,
+        image_b=_image(sheet_index, cell, row, 0) if extra else None,
+        image_c=_image(sheet_index, cell, row, 0) if quadra else None,
     )
 
 
@@ -142,6 +145,23 @@ def test_triple_replacement_and_clear_reset_selection_and_context():
     assert triple.image_b is not None
     assert state.workbook_paths["b"] == "b.xlsx"
     assert state.preview_temp_dir == "triple-preview"
+
+    quadra = _item(8, 1, "D4", quadra=True)
+    state.set_items(
+        {8: [quadra]},
+        mode="quadra",
+        workbook_paths={
+            "ref": "r.xlsx",
+            "a": "a.xlsx",
+            "b": "b.xlsx",
+            "c": "c.xlsx",
+        },
+        preview_temp_dir="quadra-preview",
+    )
+    assert state.mode == "quadra"
+    assert state.flat_items == [quadra]
+    assert quadra.image_c is not None
+    assert state.workbook_paths["c"] == "c.xlsx"
 
     state.clear()
     assert state.items_by_sheet == {}

@@ -32,6 +32,17 @@ def _triple_item() -> InspectionItem:
     )
 
 
+def _quadra_item(index: int = 1) -> InspectionItem:
+    return InspectionItem(
+        sheet_index=1,
+        index=index,
+        image_ref=_extracted((400, 100), (230, 30, 30)),
+        image_a=_extracted((180, 180), (30, 220, 30)),
+        image_b=_extracted((100, 400), (30, 30, 230)),
+        image_c=_extracted((240, 160), (230, 200, 30)),
+    )
+
+
 def _display_size(label) -> tuple[float, float]:
     pixmap = label.pixmap()
     assert pixmap is not None and not pixmap.isNull()
@@ -144,5 +155,47 @@ def test_list_window_places_table_above_equal_triple_previews(qapp):
         ]
         assert max(widths) - min(widths) <= 1
         _assert_equal_letterbox_previews(window)
+    finally:
+        window.close()
+
+
+def test_list_window_quadra_uses_compact_table_and_two_by_two_previews(qapp):
+    items = [_quadra_item(index) for index in range(1, 8)]
+    window = ImageListWindow(
+        items,
+        "quadra",
+        {"ref": "ref.xlsx", "a": "a.xlsx", "b": "b.xlsx", "c": "c.xlsx"},
+    )
+    try:
+        window.resize(1550, 880)
+        window.show()
+        qapp.processEvents()
+        QTest.qWait(80)
+
+        assert window.preview_splitter is None
+        assert window.quadra_preview.orientation() == Qt.Orientation.Vertical
+        assert window.quadra_top.widget(0) is window.ref_container
+        assert window.quadra_top.widget(1) is window.a_container
+        assert window.quadra_bottom.widget(0) is window.b_container
+        assert window.quadra_bottom.widget(1) is window.c_container
+
+        ref_pos = window.ref_container.mapTo(window, QPoint(0, 0))
+        a_pos = window.a_container.mapTo(window, QPoint(0, 0))
+        b_pos = window.b_container.mapTo(window, QPoint(0, 0))
+        c_pos = window.c_container.mapTo(window, QPoint(0, 0))
+        assert abs(ref_pos.y() - a_pos.y()) <= 2
+        assert abs(b_pos.y() - c_pos.y()) <= 2
+        assert b_pos.y() > ref_pos.y() + 40
+        assert a_pos.x() > ref_pos.x() + 40
+        assert c_pos.x() > b_pos.x() + 40
+
+        row_height = max(window.table.rowHeight(0), 1)
+        visible_rows = window.table.viewport().height() / row_height
+        assert 2.4 <= visible_rows <= 4.2
+        assert window.table.height() < 220
+        assert window.ref_image.width() >= 400
+        assert window.ref_image.height() >= 180
+        assert abs(window.ref_container.width() - window.a_container.width()) <= 2
+        assert abs(window.b_container.width() - window.c_container.width()) <= 2
     finally:
         window.close()

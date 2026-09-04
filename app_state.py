@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from models import InspectionItem
+from models import SUPPORTED_MODES, InspectionItem
 
 
 @dataclass
@@ -36,7 +36,7 @@ class AppState:
         workbook_paths: Optional[Dict[str, str]] = None,
         preview_temp_dir: Optional[str] = None,
     ) -> None:
-        if mode not in {"double", "triple"}:
+        if mode not in SUPPORTED_MODES:
             raise ValueError(f"지원하지 않는 검사 모드: {mode}")
         self.mode = mode
         self.items_by_sheet = {

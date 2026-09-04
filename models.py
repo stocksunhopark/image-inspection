@@ -5,6 +5,17 @@ from typing import List, Optional, Tuple
 
 from PIL import Image
 
+SUPPORTED_MODES = frozenset({"double", "triple", "quadra"})
+MODE_LABELS = {
+    "double": "Double",
+    "triple": "Triple",
+    "quadra": "Quadra",
+}
+
+
+def mode_label(mode: str) -> str:
+    return MODE_LABELS.get(mode, mode)
+
 
 @dataclass
 class ExtractedImage:
@@ -31,27 +42,36 @@ class ExtractedImage:
 
 @dataclass
 class InspectionItem:
-    """같은 위치에서 함께 보여 줄 Ref/A 또는 Ref/A/B 이미지 묶음."""
+    """같은 위치에서 함께 보여 줄 Ref/A, Ref/A/B, Ref/A/B/C 이미지 묶음."""
 
     sheet_index: int
     index: int
     image_ref: ExtractedImage
     image_a: ExtractedImage
     image_b: Optional[ExtractedImage] = None
+    image_c: Optional[ExtractedImage] = None
+
+    def _side_extracted(self) -> Tuple[ExtractedImage, ...]:
+        sides = [self.image_ref, self.image_a]
+        if self.image_b is not None:
+            sides.append(self.image_b)
+        if self.image_c is not None:
+            sides.append(self.image_c)
+        return tuple(sides)
 
     @property
     def sheet_name(self) -> str:
-        for image in (self.image_ref, self.image_a, self.image_b):
+        for image in self._side_extracted():
             if image is not None and not image.is_null and image.sheet_name:
                 return image.sheet_name
-        for image in (self.image_ref, self.image_a, self.image_b):
+        for image in self._side_extracted():
             if image is not None and image.sheet_name:
                 return image.sheet_name
         return f"Sheet{self.sheet_index}"
 
     @property
     def cell_address(self) -> str:
-        for image in (self.image_ref, self.image_a, self.image_b):
+        for image in self._side_extracted():
             if image is not None and not image.is_null:
                 return image.cell_address
         return "-"
@@ -63,4 +83,6 @@ class InspectionItem:
         ]
         if self.image_b is not None:
             images.append(("b", self.image_b))
+        if self.image_c is not None:
+            images.append(("c", self.image_c))
         return images

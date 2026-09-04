@@ -8,7 +8,7 @@ from PyQt6.QtCore import QSettings, QSignalBlocker, QThread, QTimer, Qt
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
-    QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QGridLayout,
@@ -19,7 +19,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QRadioButton,
     QSizePolicy,
     QSlider,
     QSplitter,
@@ -29,7 +28,7 @@ from PyQt6.QtWidgets import (
 
 from app_state import AppState
 from excel_manager import load_extracted_pil
-from models import ExtractedImage
+from models import SUPPORTED_MODES, ExtractedImage, mode_label
 from ui.dialogs import ImageListWindow, ImageViewerDialog
 from ui.helpers import pil_to_pixmap
 from ui.theme import apply_theme
@@ -40,7 +39,7 @@ from workers import ExcelLoadWorker
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Excel 이미지 육안 검사기")
+        self.setWindowTitle("OSC 파형 수동 비교기")
         self.setMinimumSize(900, 650)
         self.resize(1500, 920)
         self.state = AppState()
@@ -64,7 +63,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
 
-        title = QLabel("Excel 이미지 육안 검사기")
+        title = QLabel("OSC 파형 수동 비교기")
         title.setObjectName("titleLabel")
         subtitle = QLabel(
             "자동 비교나 PASS/FAIL 판정 없이, 같은 위치의 이미지를 나란히 넘겨 봅니다."
@@ -79,16 +78,15 @@ class MainWindow(QMainWindow):
         input_layout.setHorizontalSpacing(8)
         input_layout.setVerticalSpacing(7)
 
-        self.double_radio = QRadioButton("Double (Excel 2개)")
-        self.triple_radio = QRadioButton("Triple (Excel 3개)")
-        self.double_radio.setChecked(True)
-        mode_group = QButtonGroup(self)
-        mode_group.addButton(self.double_radio)
-        mode_group.addButton(self.triple_radio)
+        self.double_check = QCheckBox("Double (Excel 2개)")
+        self.triple_check = QCheckBox("Triple (Excel 3개)")
+        self.quadra_check = QCheckBox("Quadra (Excel 4개)")
+        self.double_check.setChecked(True)
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel("검사 모드"))
-        mode_row.addWidget(self.double_radio)
-        mode_row.addWidget(self.triple_radio)
+        mode_row.addWidget(self.double_check)
+        mode_row.addWidget(self.triple_check)
+        mode_row.addWidget(self.quadra_check)
         mode_row.addStretch(1)
         input_layout.addLayout(mode_row, 0, 0, 1, 3)
 
@@ -113,6 +111,21 @@ class MainWindow(QMainWindow):
         b_layout.setColumnStretch(1, 1)
         input_layout.addWidget(self.b_row, 3, 0, 1, 3)
 
+        self.c_row = QWidget()
+        c_layout = QGridLayout(self.c_row)
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        self.file_c_edit = DropLineEdit()
+        self.file_c_edit.setPlaceholderText(".xlsx 또는 .xlsm 경로 입력/끌어놓기")
+        self.file_c_button = QPushButton("파일 선택")
+        self.file_c_button.clicked.connect(
+            lambda: self._pick_file(self.file_c_edit)
+        )
+        c_layout.addWidget(QLabel("Excel 비교C"), 0, 0)
+        c_layout.addWidget(self.file_c_edit, 0, 1)
+        c_layout.addWidget(self.file_c_button, 0, 2)
+        c_layout.setColumnStretch(1, 1)
+        input_layout.addWidget(self.c_row, 4, 0, 1, 3)
+
         action_row = QHBoxLayout()
         self.load_button = QPushButton("이미지 불러오기")
         self.cancel_button = QPushButton("취소")
@@ -125,12 +138,12 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Excel 파일을 선택해 주세요.")
         self.status_label.setObjectName("statusIdle")
         action_row.addWidget(self.status_label)
-        input_layout.addLayout(action_row, 4, 0, 1, 3)
+        input_layout.addLayout(action_row, 5, 0, 1, 3)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        input_layout.addWidget(self.progress_bar, 5, 0, 1, 3)
+        input_layout.addWidget(self.progress_bar, 6, 0, 1, 3)
         input_layout.setColumnStretch(1, 1)
         layout.addWidget(input_group)
 
@@ -198,29 +211,40 @@ class MainWindow(QMainWindow):
             self.b_meta,
             self.b_image,
         ) = self._create_preview_pane("Excel 비교B")
-        for container in (self.ref_container, self.a_container, self.b_container):
+        (
+            self.c_container,
+            self.c_title,
+            self.c_meta,
+            self.c_image,
+        ) = self._create_preview_pane("Excel 비교C")
+        for container in (
+            self.ref_container,
+            self.a_container,
+            self.b_container,
+            self.c_container,
+        ):
             self.preview_splitter.addWidget(container)
         self.preview_splitter.setChildrenCollapsible(False)
-        self.preview_splitter.setStretchFactor(0, 1)
-        self.preview_splitter.setStretchFactor(1, 1)
-        self.preview_splitter.setStretchFactor(2, 1)
+        for index in range(4):
+            self.preview_splitter.setStretchFactor(index, 1)
         self.preview_splitter.setHandleWidth(1)
-        for handle_index in (1, 2):
+        for handle_index in (1, 2, 3):
             self.preview_splitter.handle(handle_index).setEnabled(False)
         self.ref_image.clicked.connect(lambda: self._enlarge("ref"))
         self.a_image.clicked.connect(lambda: self._enlarge("a"))
         self.b_image.clicked.connect(lambda: self._enlarge("b"))
+        self.c_image.clicked.connect(lambda: self._enlarge("c"))
         layout.addWidget(self.preview_splitter, stretch=1)
 
-        keyboard_hint = QLabel(
-            "←/PageUp 이전 · →/PageDown 다음 · Home/End 처음/마지막 · 이미지 클릭 시 확대"
+        self.double_check.toggled.connect(
+            lambda checked: self._on_mode_checkbox_toggled(self.double_check, checked)
         )
-        keyboard_hint.setObjectName("keyboardHint")
-        keyboard_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(keyboard_hint)
-
-        self.double_radio.toggled.connect(self._on_input_mode_changed)
-        self.triple_radio.toggled.connect(self._on_input_mode_changed)
+        self.triple_check.toggled.connect(
+            lambda checked: self._on_mode_checkbox_toggled(self.triple_check, checked)
+        )
+        self.quadra_check.toggled.connect(
+            lambda checked: self._on_mode_checkbox_toggled(self.quadra_check, checked)
+        )
         self._on_input_mode_changed()
 
     def _add_file_row(
@@ -306,20 +330,58 @@ class MainWindow(QMainWindow):
             self.addAction(action)
             self._navigation_actions.append(action)
 
+    def _mode_checkboxes(self) -> Tuple[QCheckBox, QCheckBox, QCheckBox]:
+        return (self.double_check, self.triple_check, self.quadra_check)
+
     def _selected_mode(self) -> str:
-        return "triple" if self.triple_radio.isChecked() else "double"
+        if self.quadra_check.isChecked():
+            return "quadra"
+        if self.triple_check.isChecked():
+            return "triple"
+        return "double"
+
+    def _apply_input_mode(self, mode: str) -> None:
+        selected = {
+            "double": self.double_check,
+            "triple": self.triple_check,
+            "quadra": self.quadra_check,
+        }.get(mode, self.double_check)
+        blockers = [QSignalBlocker(box) for box in self._mode_checkboxes()]
+        for box in self._mode_checkboxes():
+            box.setChecked(box is selected)
+        del blockers
+        self._on_input_mode_changed()
+
+    def _on_mode_checkbox_toggled(self, changed: QCheckBox, checked: bool) -> None:
+        others = [box for box in self._mode_checkboxes() if box is not changed]
+        if checked:
+            blockers = [QSignalBlocker(box) for box in others]
+            for box in others:
+                box.setChecked(False)
+            del blockers
+            self._on_input_mode_changed()
+            return
+        if not any(box.isChecked() for box in others):
+            with QSignalBlocker(changed):
+                changed.setChecked(True)
+            return
+        self._on_input_mode_changed()
+
+    def _apply_preview_mode(self, mode: str) -> None:
+        self.b_container.setVisible(mode in {"triple", "quadra"})
+        self.c_container.setVisible(mode == "quadra")
+        self._equalize_preview_panes(mode)
 
     def _on_input_mode_changed(self) -> None:
-        is_triple = self._selected_mode() == "triple"
-        self.b_row.setVisible(is_triple)
+        selected = self._selected_mode()
+        self.b_row.setVisible(selected in {"triple", "quadra"})
+        self.c_row.setVisible(selected == "quadra")
         if not self.state.flat_items:
-            self.b_container.setVisible(is_triple)
-            self._equalize_preview_panes(is_triple)
-        elif self._selected_mode() != self.state.mode:
-            selected = "Triple" if is_triple else "Double"
-            loaded = "Triple" if self.state.mode == "triple" else "Double"
+            self._apply_preview_mode(selected)
+        elif selected != self.state.mode:
             self._set_status(
-                f"입력 모드는 {selected}로 변경됨 · 현재 화면은 이전 {loaded} 결과입니다.",
+                f"입력 모드는 {mode_label(selected)}로 변경됨 · "
+                f"현재 화면은 이전 {mode_label(self.state.mode)} 결과입니다.",
                 busy=False,
             )
 
@@ -345,14 +407,21 @@ class MainWindow(QMainWindow):
         mode = self._selected_mode()
         path_ref = self.file_ref_edit.text().strip()
         path_a = self.file_a_edit.text().strip()
-        path_b = self.file_b_edit.text().strip() if mode == "triple" else None
+        path_b = (
+            self.file_b_edit.text().strip()
+            if mode in {"triple", "quadra"}
+            else None
+        )
+        path_c = self.file_c_edit.text().strip() if mode == "quadra" else None
         missing = []
         if not path_ref:
             missing.append("Excel Ref")
         if not path_a:
             missing.append("Excel 비교A")
-        if mode == "triple" and not path_b:
+        if mode in {"triple", "quadra"} and not path_b:
             missing.append("Excel 비교B")
+        if mode == "quadra" and not path_c:
+            missing.append("Excel 비교C")
         if missing:
             QMessageBox.warning(
                 self,
@@ -364,7 +433,7 @@ class MainWindow(QMainWindow):
         self._set_loading(True)
         self.progress_bar.setValue(0)
         self._set_status("이미지 로딩 준비 중...", busy=True)
-        worker = ExcelLoadWorker(path_ref, path_a, path_b)
+        worker = ExcelLoadWorker(path_ref, path_a, path_b, path_c)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -409,7 +478,7 @@ class MainWindow(QMainWindow):
         )
         self._cleanup_temp_dir(old_temp_dir)
         self._populate_sheet_combo()
-        self.b_container.setVisible(mode == "triple")
+        self._apply_preview_mode(mode)
         self.progress_bar.setValue(100)
         total = len(self.state.flat_items)
         if total:
@@ -432,7 +501,7 @@ class MainWindow(QMainWindow):
     def _previous_result_text(self) -> str:
         if not self.state.flat_items:
             return ""
-        mode = "Triple" if self.state.mode == "triple" else "Double"
+        mode = mode_label(self.state.mode)
         names = [
             os.path.basename(path)
             for path in self.state.workbook_paths.values()
@@ -450,14 +519,17 @@ class MainWindow(QMainWindow):
 
     def _set_loading(self, loading: bool) -> None:
         for widget in (
-            self.double_radio,
-            self.triple_radio,
+            self.double_check,
+            self.triple_check,
+            self.quadra_check,
             self.file_ref_edit,
             self.file_a_edit,
             self.file_b_edit,
+            self.file_c_edit,
             self.file_ref_button,
             self.file_a_button,
             self.file_b_button,
+            self.file_c_button,
             self.load_button,
         ):
             widget.setEnabled(not loading)
@@ -531,12 +603,14 @@ class MainWindow(QMainWindow):
             self._clear_preview_pane(
                 self.b_title, self.b_meta, self.b_image, "Excel 비교B"
             )
+            self._clear_preview_pane(
+                self.c_title, self.c_meta, self.c_image, "Excel 비교C"
+            )
             self._update_navigation_buttons()
             return
 
         current = self.state.current_index
-        loaded_mode = "Triple" if self.state.mode == "triple" else "Double"
-        self.current_mode_label.setText(f"현재 결과: {loaded_mode}")
+        self.current_mode_label.setText(f"현재 결과: {mode_label(self.state.mode)}")
         sheet_position, sheet_total = self.state.current_sheet_position()
         self.position_label.setText(f"전체 {current + 1} / {total}")
         self.location_label.setText(
@@ -566,23 +640,49 @@ class MainWindow(QMainWindow):
             self.state.workbook_paths.get("a", ""),
             item.image_a,
         )
-        if self.state.mode == "triple" and item.image_b is not None:
+        if self.state.mode in {"triple", "quadra"}:
             self.b_container.setVisible(True)
-            self._set_preview_pane(
-                self.b_title,
-                self.b_meta,
-                self.b_image,
-                "Excel 비교B",
-                self.state.workbook_paths.get("b", ""),
-                item.image_b,
-            )
+            if item.image_b is not None:
+                self._set_preview_pane(
+                    self.b_title,
+                    self.b_meta,
+                    self.b_image,
+                    "Excel 비교B",
+                    self.state.workbook_paths.get("b", ""),
+                    item.image_b,
+                )
+            else:
+                self._clear_preview_pane(
+                    self.b_title, self.b_meta, self.b_image, "Excel 비교B"
+                )
         else:
             self.b_container.setVisible(False)
-        self._equalize_preview_panes(self.state.mode == "triple")
+        if self.state.mode == "quadra":
+            self.c_container.setVisible(True)
+            if item.image_c is not None:
+                self._set_preview_pane(
+                    self.c_title,
+                    self.c_meta,
+                    self.c_image,
+                    "Excel 비교C",
+                    self.state.workbook_paths.get("c", ""),
+                    item.image_c,
+                )
+            else:
+                self._clear_preview_pane(
+                    self.c_title, self.c_meta, self.c_image, "Excel 비교C"
+                )
+        else:
+            self.c_container.setVisible(False)
+        self._equalize_preview_panes(self.state.mode)
         self._update_navigation_buttons()
 
-    def _equalize_preview_panes(self, is_triple: bool) -> None:
-        sizes = [1000, 1000, 1000] if is_triple else [1000, 1000, 0]
+    def _equalize_preview_panes(self, mode: str) -> None:
+        sizes = {
+            "double": [1000, 1000, 0, 0],
+            "triple": [1000, 1000, 1000, 0],
+            "quadra": [1000, 1000, 1000, 1000],
+        }.get(mode, [1000, 1000, 0, 0])
         self.preview_splitter.setSizes(sizes)
 
     def _clear_preview_pane(
@@ -693,6 +793,7 @@ class MainWindow(QMainWindow):
             "ref": item.image_ref,
             "a": item.image_a,
             "b": item.image_b,
+            "c": item.image_c,
         }.get(side)
         if extracted is None or extracted.is_null:
             return
@@ -700,7 +801,7 @@ class MainWindow(QMainWindow):
         if image is None:
             QMessageBox.warning(self, "이미지 오류", "이미지를 불러올 수 없습니다.")
             return
-        role = {"ref": "Ref", "a": "비교A", "b": "비교B"}[side]
+        role = {"ref": "Ref", "a": "비교A", "b": "비교B", "c": "비교C"}[side]
         ImageViewerDialog(
             image,
             f"{role} · {extracted.location_text}",
@@ -711,8 +812,8 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "사용 방법",
-            "1. Double 또는 Triple 모드를 선택합니다.\n"
-            "2. Excel 2개 또는 3개를 지정하고 이미지 불러오기를 누릅니다.\n"
+            "1. Double, Triple 또는 Quadra 모드를 선택합니다.\n"
+            "2. Excel 2개, 3개 또는 4개를 지정하고 이미지 불러오기를 누릅니다.\n"
             "3. 이전/다음 버튼이나 방향키로 같은 위치의 이미지를 넘겨 봅니다.\n"
             "4. 리스트 실행을 누르면 목록과 이미지를 함께 보고, 상단에서 시트를 선택할 수 있습니다.\n"
             "5. 이미지를 클릭하면 확대 창에서 원본을 확인할 수 있습니다.\n\n"
@@ -721,11 +822,11 @@ class MainWindow(QMainWindow):
 
     def _restore_settings(self) -> None:
         mode = self.settings.value("mode", "double", type=str)
-        self.triple_radio.setChecked(mode == "triple")
-        self.double_radio.setChecked(mode != "triple")
+        self._apply_input_mode(mode if mode in SUPPORTED_MODES else "double")
         self.file_ref_edit.setText(self.settings.value("path_ref", "", type=str))
         self.file_a_edit.setText(self.settings.value("path_a", "", type=str))
         self.file_b_edit.setText(self.settings.value("path_b", "", type=str))
+        self.file_c_edit.setText(self.settings.value("path_c", "", type=str))
         geometry = self.settings.value("geometry")
         if geometry is not None:
             self.restoreGeometry(geometry)
@@ -736,6 +837,7 @@ class MainWindow(QMainWindow):
         self.settings.setValue("path_ref", self.file_ref_edit.text().strip())
         self.settings.setValue("path_a", self.file_a_edit.text().strip())
         self.settings.setValue("path_b", self.file_b_edit.text().strip())
+        self.settings.setValue("path_c", self.file_c_edit.text().strip())
         self.settings.setValue("geometry", self.saveGeometry())
 
     def _cleanup_temp_dir(self, path: Optional[str]) -> None:

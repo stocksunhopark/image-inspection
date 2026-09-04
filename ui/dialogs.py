@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from excel_manager import load_extracted_pil
-from models import ExtractedImage, InspectionItem
+from models import SUPPORTED_MODES, ExtractedImage, InspectionItem, mode_label
 from ui.helpers import pil_to_pixmap
 from ui.widgets import ClickableLabel
 
@@ -136,7 +136,7 @@ class ImageListWindow(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        if mode not in {"double", "triple"}:
+        if mode not in SUPPORTED_MODES:
             raise ValueError(f"지원하지 않는 검사 모드: {mode}")
         self._all_items = list(items)
         self._items = list(self._all_items)
@@ -147,7 +147,8 @@ class ImageListWindow(QDialog):
         self._workbook_paths = dict(workbook_paths)
         self._current_index = -1
         self._closing = False
-        mode_label = "Triple" if mode == "triple" else "Double"
+        self._quadra_list_sizes_applied = False
+        label = mode_label(mode)
         filenames = [
             os.path.basename(path)
             for path in self._workbook_paths.values()
@@ -155,9 +156,17 @@ class ImageListWindow(QDialog):
         ]
         files_text = f" · {', '.join(filenames)}" if filenames else ""
         self.setWindowTitle(
-            f"Excel 이미지 리스트 · {mode_label} · {len(self._all_items)}개{files_text}"
+            f"Excel 이미지 리스트 · {label} · {len(self._all_items)}개{files_text}"
         )
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
         self.resize(1550, 880)
         self.setMinimumSize(980, 620)
 
@@ -166,7 +175,7 @@ class ImageListWindow(QDialog):
         root.setSpacing(7)
 
         header = QHBoxLayout()
-        title = QLabel(f"Excel 이미지 리스트 · {mode_label}")
+        title = QLabel(f"Excel 이미지 리스트 · {label}")
         title.setObjectName("positionLabel")
         header.addWidget(title)
         header.addSpacing(14)
@@ -214,7 +223,6 @@ class ImageListWindow(QDialog):
         preview_hint.setObjectName("keyboardHint")
         preview_layout.addWidget(preview_hint)
 
-        self.preview_splitter = QSplitter(Qt.Orientation.Horizontal)
         (
             self.ref_container,
             self.ref_title,
@@ -233,23 +241,63 @@ class ImageListWindow(QDialog):
             self.b_meta,
             self.b_image,
         ) = self._create_preview_pane("Excel 비교B")
-        for container in (self.ref_container, self.a_container, self.b_container):
-            self.preview_splitter.addWidget(container)
-        self.preview_splitter.setChildrenCollapsible(False)
-        for index in range(3):
-            self.preview_splitter.setStretchFactor(index, 1)
-        self.preview_splitter.setHandleWidth(1)
-        for handle_index in (1, 2):
-            self.preview_splitter.handle(handle_index).setEnabled(False)
-        self.b_container.setVisible(mode == "triple")
+        (
+            self.c_container,
+            self.c_title,
+            self.c_meta,
+            self.c_image,
+        ) = self._create_preview_pane("Excel 비교C")
         self.ref_image.clicked.connect(lambda: self._enlarge("ref"))
         self.a_image.clicked.connect(lambda: self._enlarge("a"))
         self.b_image.clicked.connect(lambda: self._enlarge("b"))
-        preview_layout.addWidget(self.preview_splitter, stretch=1)
+        self.c_image.clicked.connect(lambda: self._enlarge("c"))
+        self.b_container.setVisible(mode in {"triple", "quadra"})
+        self.c_container.setVisible(mode == "quadra")
+        if mode == "quadra":
+            self.preview_splitter = None
+            self.quadra_top = QSplitter(Qt.Orientation.Horizontal)
+            self.quadra_bottom = QSplitter(Qt.Orientation.Horizontal)
+            self.quadra_preview = QSplitter(Qt.Orientation.Vertical)
+            self.quadra_top.addWidget(self.ref_container)
+            self.quadra_top.addWidget(self.a_container)
+            self.quadra_bottom.addWidget(self.b_container)
+            self.quadra_bottom.addWidget(self.c_container)
+            for row_splitter in (self.quadra_top, self.quadra_bottom):
+                row_splitter.setChildrenCollapsible(False)
+                row_splitter.setHandleWidth(1)
+                row_splitter.setStretchFactor(0, 1)
+                row_splitter.setStretchFactor(1, 1)
+                row_splitter.handle(1).setEnabled(False)
+            self.quadra_preview.addWidget(self.quadra_top)
+            self.quadra_preview.addWidget(self.quadra_bottom)
+            self.quadra_preview.setChildrenCollapsible(False)
+            self.quadra_preview.setHandleWidth(1)
+            self.quadra_preview.setStretchFactor(0, 1)
+            self.quadra_preview.setStretchFactor(1, 1)
+            preview_layout.addWidget(self.quadra_preview, stretch=1)
+        else:
+            self.preview_splitter = QSplitter(Qt.Orientation.Horizontal)
+            for container in (
+                self.ref_container,
+                self.a_container,
+                self.b_container,
+                self.c_container,
+            ):
+                self.preview_splitter.addWidget(container)
+            self.preview_splitter.setChildrenCollapsible(False)
+            for index in range(4):
+                self.preview_splitter.setStretchFactor(index, 1)
+            self.preview_splitter.setHandleWidth(1)
+            for handle_index in (1, 2, 3):
+                self.preview_splitter.handle(handle_index).setEnabled(False)
+            preview_layout.addWidget(self.preview_splitter, stretch=1)
         self.content_splitter.addWidget(self.preview_widget)
         self.content_splitter.setStretchFactor(0, 0)
         self.content_splitter.setStretchFactor(1, 1)
-        self.content_splitter.setSizes([240, 600])
+        if mode == "quadra":
+            self.content_splitter.setSizes([self._list_table_default_height(), 900])
+        else:
+            self.content_splitter.setSizes([240, 600])
         root.addWidget(self.content_splitter, stretch=1)
 
         self._populate_sheet_combo()
@@ -345,8 +393,10 @@ class ImageListWindow(QDialog):
 
     def _populate_table(self) -> None:
         headers = ["전체", "시트", "시트 내", "Ref 셀", "비교A 셀"]
-        if self._mode == "triple":
+        if self._mode in {"triple", "quadra"}:
             headers.append("비교B 셀")
+        if self._mode == "quadra":
+            headers.append("비교C 셀")
         self.table.setUpdatesEnabled(False)
         blocker = QSignalBlocker(self.table)
         self.table.setColumnCount(len(headers))
@@ -366,8 +416,10 @@ class ImageListWindow(QDialog):
                 self._cell_text(item.image_ref),
                 self._cell_text(item.image_a),
             ]
-            if self._mode == "triple":
+            if self._mode in {"triple", "quadra"}:
                 values.append(self._cell_text(item.image_b))
+            if self._mode == "quadra":
+                values.append(self._cell_text(item.image_c))
             for column, value in enumerate(values):
                 table_item = QTableWidgetItem(value)
                 table_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -451,6 +503,9 @@ class ImageListWindow(QDialog):
             self._clear_preview_pane(
                 self.b_title, self.b_meta, self.b_image, "Excel 비교B"
             )
+            self._clear_preview_pane(
+                self.c_title, self.c_meta, self.c_image, "Excel 비교C"
+            )
             return
 
         item = self._items[self._current_index]
@@ -482,27 +537,63 @@ class ImageListWindow(QDialog):
             self._workbook_paths.get("a", ""),
             item.image_a,
         )
-        if self._mode == "triple" and item.image_b is not None:
-            self._set_preview_pane(
-                self.b_title,
-                self.b_meta,
-                self.b_image,
-                "Excel 비교B",
-                self._workbook_paths.get("b", ""),
-                item.image_b,
-            )
-        elif self._mode == "triple":
-            self._clear_preview_pane(
-                self.b_title, self.b_meta, self.b_image, "Excel 비교B"
-            )
+        if self._mode in {"triple", "quadra"}:
+            if item.image_b is not None:
+                self._set_preview_pane(
+                    self.b_title,
+                    self.b_meta,
+                    self.b_image,
+                    "Excel 비교B",
+                    self._workbook_paths.get("b", ""),
+                    item.image_b,
+                )
+            else:
+                self._clear_preview_pane(
+                    self.b_title, self.b_meta, self.b_image, "Excel 비교B"
+                )
+        if self._mode == "quadra":
+            if item.image_c is not None:
+                self._set_preview_pane(
+                    self.c_title,
+                    self.c_meta,
+                    self.c_image,
+                    "Excel 비교C",
+                    self._workbook_paths.get("c", ""),
+                    item.image_c,
+                )
+            else:
+                self._clear_preview_pane(
+                    self.c_title, self.c_meta, self.c_image, "Excel 비교C"
+                )
         self._equalize_preview_panes()
 
+    def _list_table_default_height(self) -> int:
+        visible_rows = 3 if self._mode == "quadra" else 7
+        header_height = max(self.table.horizontalHeader().sizeHint().height(), 24)
+        row_height = self.table.verticalHeader().defaultSectionSize()
+        if self.table.rowCount() > 0:
+            row_height = max(row_height, self.table.rowHeight(0))
+        return header_height + self.table.frameWidth() * 2 + row_height * visible_rows + 6
+
+    def _apply_quadra_list_sizes(self) -> None:
+        table_height = self._list_table_default_height()
+        leftover = self.content_splitter.height() - table_height
+        preview_height = leftover if leftover > 200 else 700
+        self.content_splitter.setSizes([table_height, preview_height])
+        self.quadra_top.setSizes([1000, 1000])
+        self.quadra_bottom.setSizes([1000, 1000])
+        self.quadra_preview.setSizes([1000, 1000])
+
     def _equalize_preview_panes(self) -> None:
-        sizes = (
-            [1000, 1000, 1000]
-            if self._mode == "triple"
-            else [1000, 1000, 0]
-        )
+        if self._mode == "quadra":
+            self.quadra_top.setSizes([1000, 1000])
+            self.quadra_bottom.setSizes([1000, 1000])
+            self.quadra_preview.setSizes([1000, 1000])
+            return
+        sizes = {
+            "double": [1000, 1000, 0, 0],
+            "triple": [1000, 1000, 1000, 0],
+        }.get(self._mode, [1000, 1000, 0, 0])
         self.preview_splitter.setSizes(sizes)
 
     @staticmethod
@@ -551,13 +642,14 @@ class ImageListWindow(QDialog):
             "ref": item.image_ref,
             "a": item.image_a,
             "b": item.image_b,
+            "c": item.image_c,
         }.get(side)
         if extracted is None or extracted.is_null:
             return
         image = load_extracted_pil(extracted)
         if image is None:
             return
-        role = {"ref": "Ref", "a": "비교A", "b": "비교B"}[side]
+        role = {"ref": "Ref", "a": "비교A", "b": "비교B", "c": "비교C"}[side]
         ImageViewerDialog(
             image,
             f"{role} · {extracted.location_text}",
@@ -593,7 +685,15 @@ class ImageListWindow(QDialog):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        if self._mode == "quadra" and not self._quadra_list_sizes_applied:
+            QTimer.singleShot(0, self._finish_quadra_list_layout)
         self.focus_list()
+
+    def _finish_quadra_list_layout(self) -> None:
+        if self._closing or self._quadra_list_sizes_applied:
+            return
+        self._apply_quadra_list_sizes()
+        self._quadra_list_sizes_applied = True
 
     def closeEvent(self, event) -> None:
         self._stop_rendering()

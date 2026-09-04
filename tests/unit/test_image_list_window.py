@@ -78,6 +78,11 @@ def sample_items(tmp_path: Path):
         _null_image(1, "A2"),
         _real_image(tmp_path, "b-3", 2, "B1", (210, 40, 150)),
     ]
+    compares_c = [
+        _real_image(tmp_path, "c-1", 1, "A1", (240, 180, 20)),
+        _null_image(1, "A2"),
+        _real_image(tmp_path, "c-3", 2, "B1", (40, 220, 220)),
+    ]
 
     double_items = [
         InspectionItem(
@@ -98,14 +103,27 @@ def sample_items(tmp_path: Path):
         )
         for position, item in enumerate(double_items)
     ]
+    quadra_items = [
+        InspectionItem(
+            sheet_index=item.sheet_index,
+            index=item.index,
+            image_ref=item.image_ref,
+            image_a=item.image_a,
+            image_b=item.image_b,
+            image_c=compares_c[position],
+        )
+        for position, item in enumerate(triple_items)
+    ]
     paths = {
         "ref": str(tmp_path / "reference.xlsx"),
         "a": str(tmp_path / "compare-a.xlsx"),
         "b": str(tmp_path / "compare-b.xlsx"),
+        "c": str(tmp_path / "compare-c.xlsx"),
     }
     return {
         "double": double_items,
         "triple": triple_items,
+        "quadra": quadra_items,
         "paths": paths,
     }
 
@@ -134,6 +152,9 @@ def test_double_table_initial_index_and_keyboard_update_preview_immediately(
     try:
         assert window.isModal() is False
         assert window.windowModality() == Qt.WindowModality.NonModal
+        assert bool(
+            window.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
+        )
         window.show()
         qapp.processEvents()
         assert window.isVisible()
@@ -221,6 +242,33 @@ def test_triple_adds_visible_b_column_and_updates_null_and_real_b_preview(
         assert window.table.currentRow() == 2
         assert "B1" in window.b_meta.text()
         assert _source_rgb(window.b_image) == (210, 40, 150)
+    finally:
+        _close_window(window, qapp)
+
+
+def test_quadra_adds_visible_c_column_and_preview(
+    qapp,
+    sample_items,
+):
+    window = ImageListWindow(
+        sample_items["quadra"],
+        "quadra",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        window.show()
+        qapp.processEvents()
+
+        assert window.table.columnCount() == 7
+        assert window.table.horizontalHeaderItem(6).text() == "비교C 셀"
+        assert window.table.item(1, 6).text() == "이미지 없음"
+        assert not window.b_container.isHidden()
+        assert not window.c_container.isHidden()
+        assert _source_rgb(window.c_image) == (240, 180, 20)
+
+        QTest.keyClick(window.table, Qt.Key.Key_Down)
+        assert window.c_image.text() == "해당 위치에 이미지가 없습니다."
     finally:
         _close_window(window, qapp)
 

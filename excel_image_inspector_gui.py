@@ -14,7 +14,7 @@ from ui.main_window import MainWindow
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Excel Image Inspector")
-    app.setApplicationDisplayName("Excel 이미지 육안 검사기")
+    app.setApplicationDisplayName("OSC 파형 수동 비교기")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

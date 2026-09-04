@@ -37,6 +37,14 @@ A_COLORS: Dict[str, Color] = {
     "P60": (40, 170, 170),
     "SECOND!C3": (100, 90, 50),
 }
+C_COLORS: Dict[str, Color] = {
+    "A2": (190, 60, 50),
+    "D9": (50, 190, 60),
+    "H21": (50, 60, 190),
+    "J30": (160, 50, 160),
+    "R70": (90, 90, 20),
+    "SECOND!C3": (70, 110, 70),
+}
 B_COLORS: Dict[str, Color] = {
     "A2": (200, 50, 40),
     "D9": (40, 200, 50),
@@ -122,7 +130,23 @@ def inspection_books(tmp_path: Path) -> Dict[str, Path]:
             "SECOND": {"images": {"C3": B_COLORS["SECOND!C3"]}},
         },
     )
-    return {"ref": ref, "a": compare_a, "b": compare_b}
+    compare_c = _write_workbook(
+        tmp_path / "c.xlsx",
+        {
+            "MAIN": {
+                "merges": common_merge,
+                "images": {
+                    "R70": C_COLORS["R70"],
+                    "J30": C_COLORS["J30"],
+                    "H21": C_COLORS["H21"],
+                    "D9": C_COLORS["D9"],
+                    "A2": C_COLORS["A2"],
+                },
+            },
+            "SECOND": {"images": {"C3": C_COLORS["SECOND!C3"]}},
+        },
+    )
+    return {"ref": ref, "a": compare_a, "b": compare_b, "c": compare_c}
 
 
 def _all_items(items_by_sheet: Dict[int, list[InspectionItem]]) -> list[InspectionItem]:
@@ -201,6 +225,7 @@ def test_double_matches_exact_adjacent_and_merged_positions_and_keeps_missing_si
         assert main[3].image_ref.cell_address == "J30"
         assert main[4].image_a.cell_address == "L40"
         assert all(item.image_b is None for item in _all_items(items_by_sheet))
+        assert all(item.image_c is None for item in _all_items(items_by_sheet))
 
         assert [item.cell_address for item in items_by_sheet[2]] == ["C3"]
         assert items_by_sheet[2][0].index == 1
@@ -278,12 +303,78 @@ def test_triple_aligns_all_sides_persists_lazy_sources_and_reports_progress(
         # Sources have been copied lazily, so all input workbooks can be moved
         # after the service returns (important for Windows file handles).
         for role, workbook_path in inspection_books.items():
+            if role == "c":
+                continue
             moved = workbook_path.with_name(f"{role}-moved.xlsx")
             workbook_path.rename(moved)
             assert moved.is_file()
         assert load_extracted_pil(first.image_ref) is not None
     finally:
         shutil.rmtree(preview_dir, ignore_errors=True)
+
+
+def test_quadra_aligns_c_side_and_keeps_c_only_rows(
+    inspection_books: Dict[str, Path],
+):
+    items_by_sheet, preview_dir = load_inspection_images(
+        str(inspection_books["ref"]),
+        str(inspection_books["a"]),
+        str(inspection_books["b"]),
+        str(inspection_books["c"]),
+    )
+    try:
+        main = items_by_sheet[1]
+        assert [item.cell_address for item in main] == [
+            "A2",
+            "D10",
+            "F20",
+            "J30",
+            "L40",
+            "N50",
+            "P60",
+            "R70",
+        ]
+        first = main[0]
+        assert first.image_c is not None
+        _assert_real_lazy_image(first.image_ref, preview_dir, REF_COLORS["A2"])
+        _assert_real_lazy_image(first.image_a, preview_dir, A_COLORS["A2"])
+        _assert_real_lazy_image(first.image_b, preview_dir, B_COLORS["A2"])
+        _assert_real_lazy_image(first.image_c, preview_dir, C_COLORS["A2"])
+        assert first.image_c.cell_address == "A2"
+        assert main[1].image_c is not None
+        assert main[1].image_c.cell_address == "D9"
+        assert main[2].image_c is not None
+        assert main[2].image_c.cell_address == "H21"
+        assert main[3].image_c is not None
+        assert main[3].image_c.cell_address == "J30"
+        last = main[7]
+        assert last.image_c is not None
+        assert last.image_c.cell_address == "R70"
+        _assert_null_image(last.image_ref, "R70")
+        _assert_null_image(last.image_a, "R70")
+        _assert_null_image(last.image_b, "R70")
+        second = items_by_sheet[2][0]
+        assert second.image_c is not None
+        _assert_real_lazy_image(second.image_c, preview_dir, C_COLORS["SECOND!C3"])
+    finally:
+        shutil.rmtree(preview_dir, ignore_errors=True)
+
+
+def test_quadra_requires_compare_b(tmp_path: Path):
+    ref = _write_workbook(
+        tmp_path / "ref-c-only.xlsx",
+        {"MAIN": {"images": {"A1": (10, 20, 30)}}},
+    )
+    compare_a = _write_workbook(
+        tmp_path / "a-c-only.xlsx",
+        {"MAIN": {"images": {"A1": (10, 20, 30)}}},
+    )
+    compare_c = _write_workbook(
+        tmp_path / "c-only.xlsx",
+        {"MAIN": {"images": {"A1": (10, 20, 30)}}},
+    )
+    with pytest.raises(ValueError, match="비교B"):
+        load_inspection_images(str(ref), str(compare_a), path_c=str(compare_c))
 
 
 def test_cancellation_raises_and_removes_partial_preview_directory(
