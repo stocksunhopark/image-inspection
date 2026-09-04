@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Excel Image Inspector",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/excel_image_inspector_gui.py",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}
