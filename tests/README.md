@@ -7,7 +7,8 @@
 - `test_app_state.py`: 처음/이전/다음/마지막 및 시트 이동 경계
 - `test_sheet_names.py`: Excel 시트 탭 순서 읽기
 - `test_image_viewer_dialog.py`: 확대 창의 창맞춤/확대 동작
-- `test_image_list_window.py`: 리스트의 `↑/↓` 이동과 Double/Triple 이미지 갱신
+- `test_image_list_window.py`: 리스트의 `↑/↓` 이동, Double/Triple/Quadra 이미지 갱신, 하이퍼링크 모드
+- `test_excel_jump.py`: 리스트 칸에서 Excel 이동 대상을 고르는 순수 로직
 - `test_preview_layout.py`: Triple 동일 크기 letterbox와 상단 목록·하단 이미지 배치
 - `test_main_window.py`: 비교 점수 GUI가 없는 Double/Triple 화면 탐색
 

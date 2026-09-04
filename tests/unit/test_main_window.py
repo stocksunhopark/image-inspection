@@ -210,3 +210,22 @@ def test_mode_checkboxes_are_exclusive(qapp, tmp_path, monkeypatch):
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_usage_help_covers_modes_list_and_hyperlink(qapp):
+    from ui.dialogs import USAGE_HELP_TEXT, UsageHelpDialog
+
+    assert "Double (Excel 2개)" in USAGE_HELP_TEXT
+    assert "Triple (Excel 3개)" in USAGE_HELP_TEXT
+    assert "Quadra (Excel 4개)" in USAGE_HELP_TEXT
+    assert "리스트실행" in USAGE_HELP_TEXT
+    assert "하이퍼링크 모드" in USAGE_HELP_TEXT
+    assert "PASS/FAIL" in USAGE_HELP_TEXT
+    assert "Ctrl+Enter" in USAGE_HELP_TEXT
+    dialog = UsageHelpDialog()
+    try:
+        assert dialog.windowTitle() == "사용 방법"
+        assert "하이퍼링크 모드" in dialog.text.toPlainText()
+    finally:
+        dialog.close()
+        dialog.deleteLater()

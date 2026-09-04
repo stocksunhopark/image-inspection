@@ -29,7 +29,7 @@ from PyQt6.QtWidgets import (
 from app_state import AppState
 from excel_manager import load_extracted_pil
 from models import SUPPORTED_MODES, ExtractedImage, mode_label
-from ui.dialogs import ImageListWindow, ImageViewerDialog
+from ui.dialogs import ImageListWindow, ImageViewerDialog, UsageHelpDialog
 from ui.helpers import pil_to_pixmap
 from ui.theme import apply_theme
 from ui.widgets import ClickableLabel, DropLineEdit
@@ -809,16 +809,7 @@ class MainWindow(QMainWindow):
         ).exec()
 
     def _show_help(self) -> None:
-        QMessageBox.information(
-            self,
-            "사용 방법",
-            "1. Double, Triple 또는 Quadra 모드를 선택합니다.\n"
-            "2. Excel 2개, 3개 또는 4개를 지정하고 이미지 불러오기를 누릅니다.\n"
-            "3. 이전/다음 버튼이나 방향키로 같은 위치의 이미지를 넘겨 봅니다.\n"
-            "4. 리스트 실행을 누르면 목록과 이미지를 함께 보고, 상단에서 시트를 선택할 수 있습니다.\n"
-            "5. 이미지를 클릭하면 확대 창에서 원본을 확인할 수 있습니다.\n\n"
-            "자동 점수 계산과 PASS/FAIL 판정은 수행하지 않습니다.",
-        )
+        UsageHelpDialog(self).exec()
 
     def _restore_settings(self) -> None:
         mode = self.settings.value("mode", "double", type=str)

@@ -11,6 +11,7 @@ from PyQt6.QtCore import QSettings, QTimer, Qt
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
+import ui.dialogs as dialogs_module
 import ui.main_window as main_window_module
 from models import ExtractedImage, InspectionItem
 from ui.dialogs import ImageListWindow
@@ -164,7 +165,7 @@ def test_double_table_initial_index_and_keyboard_update_preview_immediately(
         assert [
             window.table.horizontalHeaderItem(column).text()
             for column in range(window.table.columnCount())
-        ] == ["전체", "시트", "시트 내", "Ref 셀", "비교A 셀"]
+        ] == ["전체", "시트", "No.", "Ref 셀", "비교A 셀"]
         assert window.table.item(1, 4).text() == "이미지 없음"
         assert window.table.currentRow() == 1
         assert window.position_label.text() == "전체 2 / 3"
@@ -271,6 +272,71 @@ def test_quadra_adds_visible_c_column_and_preview(
         assert window.c_image.text() == "해당 위치에 이미지가 없습니다."
     finally:
         _close_window(window, qapp)
+
+
+def test_list_column_plan_gives_half_leftover_to_visible_cell_columns():
+    double = ImageListWindow.list_column_widths(5, 1000)
+    triple = ImageListWindow.list_column_widths(6, 1000)
+    quadra = ImageListWindow.list_column_widths(7, 1000)
+
+    assert double[0] == ImageListWindow._INDEX_COLUMN_WIDTH
+    assert double[2] == ImageListWindow._NO_COLUMN_WIDTH
+    leftover_double = 1000 - (
+        ImageListWindow._INDEX_COLUMN_WIDTH
+        + ImageListWindow._NO_COLUMN_WIDTH
+        + 2 * ImageListWindow._CELL_COLUMN_WIDTH
+    )
+    assert double[1] == leftover_double // 2
+    assert sum(double[3:]) == 2 * ImageListWindow._CELL_COLUMN_WIDTH + (
+        leftover_double - leftover_double // 2
+    )
+    assert max(double[3:]) - min(double[3:]) <= 1
+
+    leftover_triple = 1000 - (
+        ImageListWindow._INDEX_COLUMN_WIDTH
+        + ImageListWindow._NO_COLUMN_WIDTH
+        + 3 * ImageListWindow._CELL_COLUMN_WIDTH
+    )
+    assert triple[1] == leftover_triple // 2
+    assert max(triple[3:]) - min(triple[3:]) <= 1
+
+    leftover_quadra = 1000 - (
+        ImageListWindow._INDEX_COLUMN_WIDTH
+        + ImageListWindow._NO_COLUMN_WIDTH
+        + 4 * ImageListWindow._CELL_COLUMN_WIDTH
+    )
+    assert quadra[1] == leftover_quadra // 2
+    assert max(quadra[3:]) - min(quadra[3:]) <= 1
+
+
+def test_sheet_half_leftover_is_shared_by_visible_cell_columns_in_all_modes(
+    qapp,
+    sample_items,
+):
+    for mode in ("double", "triple", "quadra"):
+        window = ImageListWindow(
+            sample_items[mode],
+            mode,
+            sample_items["paths"],
+            initial_index=0,
+        )
+        try:
+            window.resize(1550, 880)
+            window.show()
+            qapp.processEvents()
+            plan = ImageListWindow.list_column_widths(
+                window.table.columnCount(),
+                window.table.viewport().width(),
+            )
+            actual = [
+                window.table.columnWidth(column)
+                for column in range(window.table.columnCount())
+            ]
+            assert actual == plan
+            assert max(actual[3:]) - min(actual[3:]) <= 1
+            assert actual[3] > ImageListWindow._CELL_COLUMN_WIDTH
+        finally:
+            _close_window(window, qapp)
 
 
 def test_sheet_selector_filters_rows_and_keeps_arrow_navigation_in_sheet(
@@ -400,3 +466,164 @@ def test_closing_list_while_image_viewer_is_open_does_not_touch_deleted_table(
     QTimer.singleShot(0, window.prepare_for_close)
     window.ref_image.clicked.emit()
     qapp.processEvents()
+
+
+def _patch_list_settings(tmp_path: Path, monkeypatch):
+    settings_path = tmp_path / "list-settings.ini"
+    monkeypatch.setattr(
+        dialogs_module,
+        "QSettings",
+        lambda *_args: QSettings(str(settings_path), QSettings.Format.IniFormat),
+    )
+
+
+def test_hyperlink_mode_is_off_by_default_and_only_double_click_jumps(
+    qapp,
+    tmp_path: Path,
+    monkeypatch,
+    sample_items,
+):
+    _patch_list_settings(tmp_path, monkeypatch)
+    jumps = []
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    for path in sample_items["paths"].values():
+        Path(path).write_bytes(b"xlsx")
+
+    window = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        window.show()
+        qapp.processEvents()
+        assert window.hyperlink_check.isChecked() is False
+        assert window.sheet_combo.width() > 0
+        assert window.hyperlink_check.text() == "하이퍼링크 모드"
+
+        window._on_cell_double_clicked(0, 3)
+        assert jumps == []
+
+        QTest.keyClick(window.table, Qt.Key.Key_Down)
+        assert window.table.currentRow() == 1
+        assert jumps == []
+
+        window.hyperlink_check.setChecked(True)
+        window._on_cell_double_clicked(0, 0)
+        window._on_cell_double_clicked(0, 1)
+        window._on_cell_double_clicked(0, 2)
+        assert jumps == []
+
+        window._on_cell_double_clicked(0, 3)
+        assert len(jumps) == 1
+        assert jumps[0][1] == "Sheet 1"
+        assert jumps[0][2] == "A1"
+        assert jumps[0][0].endswith("reference.xlsx")
+
+        window._on_cell_double_clicked(0, 4)
+        assert len(jumps) == 2
+        assert jumps[1][2] == "A1"
+        assert jumps[1][0].endswith("compare-a.xlsx")
+
+        window._on_cell_double_clicked(1, 4)
+        assert len(jumps) == 2
+    finally:
+        _close_window(window, qapp)
+
+
+def test_quadra_hyperlink_double_click_uses_b_and_c_columns(
+    qapp,
+    tmp_path: Path,
+    monkeypatch,
+    sample_items,
+):
+    _patch_list_settings(tmp_path, monkeypatch)
+    jumps = []
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    for path in sample_items["paths"].values():
+        Path(path).write_bytes(b"xlsx")
+
+    window = ImageListWindow(
+        sample_items["quadra"],
+        "quadra",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        window.hyperlink_check.setChecked(True)
+        window._on_cell_double_clicked(0, 5)
+        window._on_cell_double_clicked(0, 6)
+        window._on_cell_double_clicked(1, 6)
+        assert [item[2] for item in jumps] == ["A1", "A1"]
+        assert jumps[0][0].endswith("compare-b.xlsx")
+        assert jumps[1][0].endswith("compare-c.xlsx")
+    finally:
+        _close_window(window, qapp)
+
+
+def test_hyperlink_mode_persists_and_respects_sheet_filter_and_missing_file(
+    qapp,
+    tmp_path: Path,
+    monkeypatch,
+    sample_items,
+):
+    _patch_list_settings(tmp_path, monkeypatch)
+    jumps = []
+    warnings = []
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    monkeypatch.setattr(
+        dialogs_module.QMessageBox,
+        "warning",
+        lambda *args, **kwargs: warnings.append((args, kwargs)),
+    )
+
+    first = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        first.hyperlink_check.setChecked(True)
+        first.sheet_combo.setCurrentIndex(2)
+        qapp.processEvents()
+        first._on_cell_double_clicked(0, 3)
+        assert jumps == []
+        assert warnings
+        assert "reference.xlsx" in str(warnings[0])
+    finally:
+        _close_window(first, qapp)
+
+    for path in sample_items["paths"].values():
+        Path(path).write_bytes(b"xlsx")
+
+    second = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        assert second.hyperlink_check.isChecked() is True
+        second.sheet_combo.setCurrentIndex(2)
+        qapp.processEvents()
+        assert second.table.rowCount() == 1
+        second._on_cell_double_clicked(0, 3)
+        assert len(jumps) == 1
+        assert jumps[0][1] == "Sheet 2"
+        assert jumps[0][2] == "B1"
+    finally:
+        _close_window(second, qapp)

@@ -4,15 +4,18 @@ import os
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image
-from PyQt6.QtCore import QSignalBlocker, Qt, QTimer
+from PyQt6.QtCore import QSettings, QSignalBlocker, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -23,6 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from excel_jump import jump_target_for_list_cell, jump_to_excel_cell
 from excel_manager import load_extracted_pil
 from models import SUPPORTED_MODES, ExtractedImage, InspectionItem, mode_label
 from ui.helpers import pil_to_pixmap
@@ -123,8 +127,117 @@ class ImageViewerDialog(QDialog):
             QTimer.singleShot(0, self._fit_to_window)
 
 
+USAGE_HELP_TEXT = """OSC 파형 수동 비교기 사용 방법
+
+이 프로그램은 Excel에 들어 있는 파형 이미지를 같은 위치끼리 나란히 보여 줍니다.
+자동으로 점수를 내거나 PASS/FAIL을 판정하지 않습니다. 화면을 보며 직접 비교하는 도구입니다.
+
+
+1. 검사 모드 선택
+• Double (Excel 2개): Excel Ref + 비교A
+• Triple (Excel 3개): Excel Ref + 비교A + 비교B
+• Quadra (Excel 4개): Excel Ref + 비교A + 비교B + 비교C
+모드는 하나만 선택할 수 있습니다. Triple이면 비교B 칸이, Quadra이면 비교B·비교C 칸이 나타납니다.
+선택한 모드는 다음에 프로그램을 열 때도 유지됩니다.
+
+
+2. Excel 파일 지정
+지원 파일은 .xlsx, .xlsm 입니다.
+각 칸에 경로를 입력하거나, 파일을 끌어다 놓거나, [파일 선택]으로 지정합니다.
+• Excel Ref: 기준 파일
+• Excel 비교A / 비교B / 비교C: 나란히 볼 비교 파일
+비교 파일은 Ref와 같은 양식, 같은 시트 순서를 쓰는 것을 권장합니다.
+메뉴 [파일] → [Ref Excel 선택...] (Ctrl+O)으로 Ref 파일만 고를 수도 있습니다.
+
+
+3. 이미지 불러오기
+필요한 파일을 모두 지정한 뒤 [이미지 불러오기] 또는 Ctrl+Enter를 누릅니다.
+불러오는 동안 [취소]로 중단할 수 있습니다.
+이미지는 픽셀을 비교하지 않고, 아래 순서로 같은 위치로 맞춰 묶습니다.
+  1) 정확히 같은 셀
+  2) 같은 병합영역
+  3) 행·열이 각각 1칸 이내인 인접 셀
+  4) 한쪽에만 있으면 다른 칸은 '이미지 없음'으로 표시
+
+
+4. 메인 화면에서 넘기기
+불러온 뒤 같은 위치의 이미지가 한 화면에 나란히 보입니다.
+• [처음] [이전] [다음] [마지막] 버튼
+• 왼쪽 방향키, PageUp: 이전
+• 오른쪽 방향키, PageDown, Space: 다음
+• Home: 처음 / End: 마지막
+• 상단 [시트] 목록: 전체 또는 특정 시트로 이동
+• 슬라이더: 전체 위치 중 원하는 곳으로 바로 이동
+한쪽에만 이미지가 없어도 위치는 건너뛰지 않습니다.
+
+
+5. 리스트 창
+[리스트실행]을 누르면 목록과 미리보기가 함께 있는 창이 열립니다.
+• 위: 전체 / 시트 / No. / Ref 셀 / 비교A 셀 (Triple이면 비교B 셀, Quadra이면 비교C 셀까지)
+• 아래: 선택한 행의 이미지. Double·Triple은 가로로, Quadra는 Ref|A / B|C 2×2
+• 한 번 클릭 또는 ↑/↓: 미리보기만 바뀝니다. Excel은 열리지 않습니다.
+• 상단 [시트 선택]: 전체 시트 또는 특정 시트만 목록에 표시
+제목 표시줄을 더블클릭하면 최대화할 수 있습니다.
+
+
+6. 하이퍼링크 모드
+리스트 창의 [시트 선택] 옆에 [하이퍼링크 모드]가 있습니다. 기본값은 꺼짐입니다.
+켜고 끄는 값은 다음에 리스트를 열 때도 유지됩니다.
+• 꺼짐: 더블클릭해도 Excel을 열지 않습니다.
+• 켜짐: Ref 셀 / 비교A 셀 / 비교B 셀 / 비교C 셀을 더블클릭하면 해당 Excel을 열고 그 시트·셀로 이동합니다.
+  - 전체, 시트, No. 칸을 더블클릭해도 Excel은 열리지 않습니다.
+  - '이미지 없음'은 열지 않습니다.
+  - 이미 Excel이 열려 있으면 새 창을 또 열지 않고, 그 창에서 해당 파일·칸으로 이동합니다.
+  - 두 번째 이후 더블클릭에서도 Excel 창이 맨 앞으로 올라옵니다.
+목록을 넘기는 속도는 하이퍼링크를 켜도 거의 같습니다. Excel은 더블클릭한 순간에만 엽니다.
+
+
+7. 이미지 확대
+메인 화면이나 리스트 창에서 미리보기 이미지를 클릭하면 확대 창이 열립니다.
+• [확대 +] / [축소 −] 또는 + / − 키
+• [창에 맞춤] 또는 0 키
+• [실제 크기]
+창 크기를 바꾸면 맞춤 모드일 때 이미지도 다시 맞춰집니다.
+
+
+8. 참고
+• 이 프로그램은 유사도 점수, PASS/FAIL, 리포트를 만들지 않습니다.
+• 선택한 Excel 경로와 창 위치는 다음에 열 때도 기억합니다.
+• 메뉴 [도움말] → [사용 방법]에서 이 안내를 다시 볼 수 있습니다.
+"""
+
+
+class UsageHelpDialog(QDialog):
+    """도움말 메뉴에서 여는 사용 방법 창."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("사용 방법")
+        self.resize(720, 680)
+        self.setMinimumSize(520, 420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setPlainText(USAGE_HELP_TEXT)
+        self.text.setObjectName("usageHelpText")
+        layout.addWidget(self.text, stretch=1)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        close_button = QPushButton("닫기")
+        close_button.setObjectName("inputActionBtn")
+        close_button.clicked.connect(self.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+
 class ImageListWindow(QDialog):
     """Excel 위치 목록과 해당 Double/Triple 이미지를 동시에 표시한다."""
+
+    excel_jump_failed = pyqtSignal(str)
+    _INDEX_COLUMN_WIDTH = 58
+    _NO_COLUMN_WIDTH = 72
+    _CELL_COLUMN_WIDTH = 92
 
     def __init__(
         self,
@@ -184,6 +297,17 @@ class ImageListWindow(QDialog):
         self.sheet_combo.setMinimumWidth(230)
         self.sheet_combo.setToolTip("목록에 표시할 Excel 시트를 선택합니다.")
         header.addWidget(self.sheet_combo)
+        self.hyperlink_check = QCheckBox("하이퍼링크 모드")
+        self.hyperlink_check.setToolTip(
+            "켜면 Ref/비교 셀을 더블클릭해 Excel에서 해당 시트와 칸으로 이동합니다."
+        )
+        self.hyperlink_check.setChecked(
+            QSettings("excel-image-inspector", "gui").value(
+                "list_hyperlink_mode", False, type=bool
+            )
+        )
+        self.hyperlink_check.toggled.connect(self._on_hyperlink_mode_toggled)
+        header.addWidget(self.hyperlink_check)
         header.addStretch(1)
         self.position_label = QLabel("0 / 0")
         self.position_label.setObjectName("positionLabel")
@@ -211,6 +335,8 @@ class ImageListWindow(QDialog):
         self.table.setWordWrap(False)
         self.table.verticalHeader().setVisible(False)
         self.table.currentCellChanged.connect(self._on_current_cell_changed)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+        self.excel_jump_failed.connect(self._on_excel_jump_failed)
         self.content_splitter.addWidget(self.table)
 
         self.preview_widget = QWidget()
@@ -392,7 +518,7 @@ class ImageListWindow(QDialog):
         self.focus_list()
 
     def _populate_table(self) -> None:
-        headers = ["전체", "시트", "시트 내", "Ref 셀", "비교A 셀"]
+        headers = ["전체", "시트", "No.", "Ref 셀", "비교A 셀"]
         if self._mode in {"triple", "quadra"}:
             headers.append("비교B 셀")
         if self._mode == "quadra":
@@ -427,13 +553,9 @@ class ImageListWindow(QDialog):
                 self.table.setItem(row, column, table_item)
 
         header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.setColumnWidth(0, 58)
-        self.table.setColumnWidth(1, 150)
-        self.table.setColumnWidth(2, 72)
-        for column in range(3, len(headers)):
-            self.table.setColumnWidth(column, 92)
-        header.setStretchLastSection(True)
+        self._apply_list_column_widths()
         del blocker
         self.table.setUpdatesEnabled(True)
 
@@ -489,6 +611,41 @@ class ImageListWindow(QDialog):
         if 0 <= current_row < len(self._items):
             self._current_index = current_row
             self._render_current()
+
+    def _on_hyperlink_mode_toggled(self, checked: bool) -> None:
+        QSettings("excel-image-inspector", "gui").setValue(
+            "list_hyperlink_mode", bool(checked)
+        )
+
+    def _on_cell_double_clicked(self, row: int, column: int) -> None:
+        if self._closing or not self.hyperlink_check.isChecked():
+            return
+        if not (0 <= row < len(self._items)):
+            return
+        target = jump_target_for_list_cell(
+            self._items[row], column, self._workbook_paths
+        )
+        if target is None:
+            return
+        path, sheet_name, cell_address = target
+        if not os.path.isfile(path):
+            QMessageBox.warning(
+                self,
+                "Excel 열기",
+                f"Excel 파일을 찾을 수 없습니다:\n{path}",
+            )
+            return
+        jump_to_excel_cell(
+            path,
+            sheet_name,
+            cell_address,
+            error_cb=self.excel_jump_failed.emit,
+        )
+
+    def _on_excel_jump_failed(self, message: str) -> None:
+        if self._closing:
+            return
+        QMessageBox.warning(self, "Excel 열기", message)
 
     def _render_current(self) -> None:
         if not (0 <= self._current_index < len(self._items)):
@@ -683,8 +840,57 @@ class ImageListWindow(QDialog):
         self._stop_rendering()
         self.close()
 
+    @classmethod
+    def list_column_widths(cls, column_count: int, viewport_width: int) -> List[int]:
+        """시트는 남는 폭의 절반, 나머지는 보이는 Ref/A/B/C 열에 균등 분배한다."""
+        cell_count = int(column_count) - 3
+        if cell_count <= 0:
+            return []
+        other_fixed = (
+            cls._INDEX_COLUMN_WIDTH
+            + cls._NO_COLUMN_WIDTH
+            + cell_count * cls._CELL_COLUMN_WIDTH
+        )
+        leftover = max(0, int(viewport_width) - other_fixed)
+        sheet_width = leftover // 2
+        extra = leftover - sheet_width
+        extra_each, extra_rem = divmod(extra, cell_count)
+        widths = [
+            cls._INDEX_COLUMN_WIDTH,
+            sheet_width,
+            cls._NO_COLUMN_WIDTH,
+        ]
+        for index in range(cell_count):
+            widths.append(
+                cls._CELL_COLUMN_WIDTH
+                + extra_each
+                + (1 if index < extra_rem else 0)
+            )
+        return widths
+
+    def _apply_list_column_widths(self) -> None:
+        if self._closing:
+            return
+        plan = self.list_column_widths(
+            self.table.columnCount(),
+            self.table.viewport().width(),
+        )
+        if not plan:
+            return
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for column, width in enumerate(plan):
+            if self.table.columnWidth(column) != width:
+                self.table.setColumnWidth(column, width)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_list_column_widths()
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        QTimer.singleShot(0, self._apply_list_column_widths)
         if self._mode == "quadra" and not self._quadra_list_sizes_applied:
             QTimer.singleShot(0, self._finish_quadra_list_layout)
         self.focus_list()
