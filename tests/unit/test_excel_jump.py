@@ -9,6 +9,7 @@ from excel_jump import (
     _bring_hwnd_to_front,
     _excel_window_hwnd,
     jump_target_for_list_cell,
+    jump_target_for_side,
     jump_to_excel_cell,
     side_for_list_column,
 )
@@ -63,6 +64,11 @@ def test_jump_target_uses_matching_workbook_sheet_and_cell(tmp_path):
     assert jump_target_for_list_cell(item, 4, paths)[2] == "E11"
     assert jump_target_for_list_cell(item, 5, paths)[2] == "F12"
     assert jump_target_for_list_cell(item, 6, paths)[2] == "G13"
+    assert jump_target_for_side(item, "ref", paths) == target
+    assert jump_target_for_side(item, "a", paths)[2] == "E11"
+    assert jump_target_for_side(item, "b", paths)[2] == "F12"
+    assert jump_target_for_side(item, "c", paths)[2] == "G13"
+    assert jump_target_for_side(item, "other", paths) is None
 
 
 def test_jump_target_skips_index_columns_and_missing_images(tmp_path):

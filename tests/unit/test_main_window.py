@@ -220,6 +220,8 @@ def test_usage_help_covers_modes_list_and_hyperlink(qapp):
     assert "Quadra (Excel 4개)" in USAGE_HELP_TEXT
     assert "리스트실행" in USAGE_HELP_TEXT
     assert "하이퍼링크 모드" in USAGE_HELP_TEXT
+    assert "엑셀 파형 바로가기" in USAGE_HELP_TEXT
+    assert "오른쪽 끝" in USAGE_HELP_TEXT
     assert "PASS/FAIL" in USAGE_HELP_TEXT
     assert "Ctrl+Enter" in USAGE_HELP_TEXT
     dialog = UsageHelpDialog()
@@ -229,3 +231,288 @@ def test_usage_help_covers_modes_list_and_hyperlink(qapp):
     finally:
         dialog.close()
         dialog.deleteLater()
+
+
+def test_main_hyperlink_checkbox_and_preview_jump_buttons(
+    qapp, tmp_path, monkeypatch
+):
+    import ui.dialogs as dialogs_module
+
+    jumps = []
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    ref_xlsx = tmp_path / "ref.xlsx"
+    a_xlsx = tmp_path / "a.xlsx"
+    ref_xlsx.write_bytes(b"xlsx")
+    a_xlsx.write_bytes(b"xlsx")
+    ref_path = _png(tmp_path / "ref.png", (200, 20, 20))
+    a_path = _png(tmp_path / "a.png", (20, 200, 20))
+    first = InspectionItem(
+        1,
+        1,
+        _extracted(ref_path, sheet_index=1, sheet_name="MAIN", cell="D10"),
+        _extracted(a_path, sheet_index=1, sheet_name="MAIN", cell="E11"),
+    )
+    second = InspectionItem(
+        1,
+        2,
+        _extracted(ref_path, sheet_index=1, sheet_name="MAIN", cell="F12"),
+        _extracted(None, sheet_index=1, sheet_name="MAIN", cell="F12"),
+    )
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        window.state.set_items(
+            {1: [first, second]},
+            mode="double",
+            workbook_paths={"ref": str(ref_xlsx), "a": str(a_xlsx)},
+        )
+        window._populate_sheet_combo()
+        window._render_current()
+        qapp.processEvents()
+
+        assert window.hyperlink_check.text() == "하이퍼링크 모드"
+        assert window.hyperlink_check.isChecked() is False
+        assert window.ref_jump_button.text() == "엑셀 파형 바로가기"
+        assert window.ref_jump_button.isEnabled() is False
+        assert window.a_jump_button.isEnabled() is False
+        assert window.b_jump_button.isEnabled() is False
+        assert window.c_jump_button.isEnabled() is False
+        window.ref_jump_button.click()
+        assert jumps == []
+
+        window.hyperlink_check.setChecked(True)
+        qapp.processEvents()
+        assert window.ref_jump_button.isEnabled() is True
+        assert window.a_jump_button.isEnabled() is True
+        assert window.b_jump_button.isEnabled() is False
+        window.ref_jump_button.click()
+        assert len(jumps) == 1
+        assert jumps[0][0].endswith("ref.xlsx")
+        assert jumps[0][1] == "MAIN"
+        assert jumps[0][2] == "D10"
+        window.a_jump_button.click()
+        assert jumps[1][2] == "E11"
+
+        window._move(1)
+        qapp.processEvents()
+        assert window.ref_jump_button.isEnabled() is True
+        assert window.a_jump_button.isEnabled() is False
+        window.a_jump_button.click()
+        assert len(jumps) == 2
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_main_enlarge_jump_follows_hyperlink_mode(qapp, tmp_path, monkeypatch):
+    import ui.dialogs as dialogs_module
+
+    jumps = []
+    captured = {}
+
+    class FakeViewer:
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+            captured["callback"] = kwargs.get("jump_callback")
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(main_window_module, "ImageViewerDialog", FakeViewer)
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    ref_xlsx = tmp_path / "ref.xlsx"
+    a_xlsx = tmp_path / "a.xlsx"
+    ref_xlsx.write_bytes(b"xlsx")
+    a_xlsx.write_bytes(b"xlsx")
+    ref_path = _png(tmp_path / "ref.png", (200, 20, 20))
+    a_path = _png(tmp_path / "a.png", (20, 200, 20))
+    item = InspectionItem(
+        1,
+        1,
+        _extracted(ref_path, sheet_index=1, sheet_name="MAIN", cell="A1"),
+        _extracted(a_path, sheet_index=1, sheet_name="MAIN", cell="B2"),
+    )
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        window.state.set_items(
+            {1: [item]},
+            mode="double",
+            workbook_paths={"ref": str(ref_xlsx), "a": str(a_xlsx)},
+        )
+        window._populate_sheet_combo()
+        window._render_current()
+        window._enlarge("ref")
+        assert captured["kwargs"]["jump_enabled"] is False
+        captured["callback"]()
+        assert jumps == []
+
+        window.hyperlink_check.setChecked(True)
+        window._enlarge("a")
+        assert captured["kwargs"]["jump_enabled"] is True
+        captured["callback"]()
+        assert len(jumps) == 1
+        assert jumps[0][0].endswith("a.xlsx")
+        assert jumps[0][2] == "B2"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_main_and_list_hyperlink_checkboxes_stay_in_sync(
+    qapp, tmp_path, monkeypatch
+):
+    import ui.dialogs as dialogs_module
+
+    settings_path = tmp_path / "settings.ini"
+    monkeypatch.setattr(
+        main_window_module,
+        "QSettings",
+        lambda *_args: QSettings(str(settings_path), QSettings.Format.IniFormat),
+    )
+    monkeypatch.setattr(
+        dialogs_module,
+        "QSettings",
+        lambda *_args: QSettings(str(settings_path), QSettings.Format.IniFormat),
+    )
+    ref_path = _png(tmp_path / "ref.png", (200, 20, 20))
+    a_path = _png(tmp_path / "a.png", (20, 200, 20))
+    item = InspectionItem(
+        1,
+        1,
+        _extracted(ref_path, sheet_index=1, sheet_name="MAIN", cell="A1"),
+        _extracted(a_path, sheet_index=1, sheet_name="MAIN", cell="A1"),
+    )
+    window = main_window_module.MainWindow()
+    try:
+        window.show()
+        window.state.set_items(
+            {1: [item]},
+            mode="double",
+            workbook_paths={"ref": "ref.xlsx", "a": "a.xlsx"},
+        )
+        window._populate_sheet_combo()
+        window._render_current()
+        window._open_image_list_window()
+        qapp.processEvents()
+        list_window = window.image_list_window
+        assert list_window is not None
+        assert window.hyperlink_check.isChecked() is False
+        assert list_window.hyperlink_check.isChecked() is False
+
+        window.hyperlink_check.setChecked(True)
+        qapp.processEvents()
+        assert list_window.hyperlink_check.isChecked() is True
+        assert list_window.ref_jump_button.isEnabled() is True
+        assert window.ref_jump_button.isEnabled() is True
+
+        list_window.hyperlink_check.setChecked(False)
+        qapp.processEvents()
+        assert window.hyperlink_check.isChecked() is False
+        assert window.ref_jump_button.isEnabled() is False
+        assert list_window.ref_jump_button.isEnabled() is False
+    finally:
+        window._close_image_list_window()
+        qapp.processEvents()
+        window.close()
+        window.deleteLater()
+
+
+def test_main_hyperlink_mode_persists(qapp, tmp_path, monkeypatch):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        assert window.hyperlink_check.isChecked() is False
+        window.hyperlink_check.setChecked(True)
+        qapp.processEvents()
+        window.settings.sync()
+    finally:
+        window.close()
+        window.deleteLater()
+
+    second = _window(tmp_path, monkeypatch)
+    try:
+        assert second.hyperlink_check.isChecked() is True
+    finally:
+        second.close()
+        second.deleteLater()
+
+
+def test_quadra_main_preview_jump_buttons(qapp, tmp_path, monkeypatch):
+    import ui.dialogs as dialogs_module
+
+    jumps = []
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    paths = {
+        "ref": tmp_path / "ref.xlsx",
+        "a": tmp_path / "a.xlsx",
+        "b": tmp_path / "b.xlsx",
+        "c": tmp_path / "c.xlsx",
+    }
+    for path in paths.values():
+        path.write_bytes(b"xlsx")
+    item = InspectionItem(
+        1,
+        1,
+        _extracted(_png(tmp_path / "ref.png", (200, 20, 20)), sheet_index=1, sheet_name="MAIN", cell="A1"),
+        _extracted(_png(tmp_path / "a.png", (20, 200, 20)), sheet_index=1, sheet_name="MAIN", cell="B1"),
+        _extracted(_png(tmp_path / "b.png", (20, 20, 200)), sheet_index=1, sheet_name="MAIN", cell="C1"),
+        _extracted(_png(tmp_path / "c.png", (200, 200, 20)), sheet_index=1, sheet_name="MAIN", cell="D1"),
+    )
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        window.quadra_check.setChecked(True)
+        window.state.set_items(
+            {1: [item]},
+            mode="quadra",
+            workbook_paths={key: str(path) for key, path in paths.items()},
+        )
+        window._populate_sheet_combo()
+        window._render_current()
+        window.hyperlink_check.setChecked(True)
+        qapp.processEvents()
+        assert window.b_jump_button.isEnabled() is True
+        assert window.c_jump_button.isEnabled() is True
+        window.b_jump_button.click()
+        window.c_jump_button.click()
+        assert [item[2] for item in jumps] == ["C1", "D1"]
+        assert jumps[0][0].endswith("b.xlsx")
+        assert jumps[1][0].endswith("c.xlsx")
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_main_preview_header_keeps_jump_button_at_right(
+    qapp, tmp_path, monkeypatch
+):
+    from tests.unit.test_preview_pane import _assert_jump_button_at_right_edge
+
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.resize(1100, 800)
+        window.show()
+        qapp.processEvents()
+        window.ref_meta.setText("SC CLKx 64 case · D137 · 시트 내 137/156")
+        _assert_jump_button_at_right_edge(
+            window.ref_container,
+            window.ref_meta,
+            window.ref_jump_button,
+            qapp,
+        )
+    finally:
+        window.close()
+        window.deleteLater()

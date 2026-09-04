@@ -4,7 +4,7 @@ import os
 import shutil
 from typing import Dict, Optional, Tuple
 
-from PyQt6.QtCore import QSettings, QSignalBlocker, QThread, QTimer, Qt
+from PyQt6.QtCore import QSettings, QSignalBlocker, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
@@ -19,7 +19,6 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QSizePolicy,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -27,9 +26,16 @@ from PyQt6.QtWidgets import (
 )
 
 from app_state import AppState
+from excel_jump import jump_target_for_side
 from excel_manager import load_extracted_pil
 from models import SUPPORTED_MODES, ExtractedImage, mode_label
-from ui.dialogs import ImageListWindow, ImageViewerDialog, UsageHelpDialog
+from ui.dialogs import (
+    ImageListWindow,
+    ImageViewerDialog,
+    UsageHelpDialog,
+    create_preview_pane,
+    start_excel_jump,
+)
 from ui.helpers import pil_to_pixmap
 from ui.theme import apply_theme
 from ui.widgets import ClickableLabel, DropLineEdit
@@ -37,6 +43,8 @@ from workers import ExcelLoadWorker
 
 
 class MainWindow(QMainWindow):
+    excel_jump_failed = pyqtSignal(str)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("OSC 파형 수동 비교기")
@@ -155,6 +163,15 @@ class MainWindow(QMainWindow):
         self.sheet_combo.setMinimumWidth(210)
         self.sheet_combo.currentIndexChanged.connect(self._select_sheet)
         top_navigation.addWidget(self.sheet_combo)
+        self.hyperlink_check = QCheckBox("하이퍼링크 모드")
+        self.hyperlink_check.setToolTip(
+            "켜면 미리보기·확대 창의 바로가기로 Excel의 해당 시트와 칸으로 이동합니다."
+        )
+        self.hyperlink_check.setChecked(
+            self.settings.value("list_hyperlink_mode", False, type=bool)
+        )
+        self.hyperlink_check.toggled.connect(self._on_hyperlink_mode_toggled)
+        top_navigation.addWidget(self.hyperlink_check)
         self.first_button = QPushButton("|◀ 처음")
         self.previous_button = QPushButton("◀ 이전")
         self.next_button = QPushButton("다음 ▶")
@@ -198,24 +215,28 @@ class MainWindow(QMainWindow):
             self.ref_title,
             self.ref_meta,
             self.ref_image,
+            self.ref_jump_button,
         ) = self._create_preview_pane("Excel Ref")
         (
             self.a_container,
             self.a_title,
             self.a_meta,
             self.a_image,
+            self.a_jump_button,
         ) = self._create_preview_pane("Excel 비교A")
         (
             self.b_container,
             self.b_title,
             self.b_meta,
             self.b_image,
+            self.b_jump_button,
         ) = self._create_preview_pane("Excel 비교B")
         (
             self.c_container,
             self.c_title,
             self.c_meta,
             self.c_image,
+            self.c_jump_button,
         ) = self._create_preview_pane("Excel 비교C")
         for container in (
             self.ref_container,
@@ -234,6 +255,11 @@ class MainWindow(QMainWindow):
         self.a_image.clicked.connect(lambda: self._enlarge("a"))
         self.b_image.clicked.connect(lambda: self._enlarge("b"))
         self.c_image.clicked.connect(lambda: self._enlarge("c"))
+        self.ref_jump_button.clicked.connect(lambda: self._jump_from_preview("ref"))
+        self.a_jump_button.clicked.connect(lambda: self._jump_from_preview("a"))
+        self.b_jump_button.clicked.connect(lambda: self._jump_from_preview("b"))
+        self.c_jump_button.clicked.connect(lambda: self._jump_from_preview("c"))
+        self.excel_jump_failed.connect(self._on_excel_jump_failed)
         layout.addWidget(self.preview_splitter, stretch=1)
 
         self.double_check.toggled.connect(
@@ -266,30 +292,8 @@ class MainWindow(QMainWindow):
 
     def _create_preview_pane(
         self, default_title: str
-    ) -> Tuple[QWidget, QLabel, QLabel, ClickableLabel]:
-        container = QWidget()
-        container.setMinimumWidth(0)
-        container.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(4)
-        title = QLabel(default_title)
-        title.setObjectName("previewTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setWordWrap(True)
-        title.setFixedHeight(40)
-        metadata = QLabel("-")
-        metadata.setObjectName("imageMeta")
-        metadata.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        metadata.setWordWrap(True)
-        metadata.setFixedHeight(42)
-        image = ClickableLabel("이미지 없음")
-        image.setObjectName("previewPane")
-        image.setCursor(Qt.CursorShape.PointingHandCursor)
-        layout.addWidget(title)
-        layout.addWidget(metadata)
-        layout.addWidget(image, stretch=1)
-        return container, title, metadata, image
+    ) -> Tuple[QWidget, QLabel, QLabel, ClickableLabel, QPushButton]:
+        return create_preview_pane(default_title)
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("파일(&F)")
@@ -607,6 +611,7 @@ class MainWindow(QMainWindow):
                 self.c_title, self.c_meta, self.c_image, "Excel 비교C"
             )
             self._update_navigation_buttons()
+            self._sync_preview_jump_buttons()
             return
 
         current = self.state.current_index
@@ -676,6 +681,7 @@ class MainWindow(QMainWindow):
             self.c_container.setVisible(False)
         self._equalize_preview_panes(self.state.mode)
         self._update_navigation_buttons()
+        self._sync_preview_jump_buttons()
 
     def _equalize_preview_panes(self, mode: str) -> None:
         sizes = {
@@ -736,6 +742,73 @@ class MainWindow(QMainWindow):
         self.sheet_combo.setEnabled(total > 0)
         self.position_slider.setEnabled(total > 0)
 
+    def _on_hyperlink_mode_toggled(self, checked: bool) -> None:
+        self.settings.setValue("list_hyperlink_mode", bool(checked))
+        self._sync_preview_jump_buttons()
+        list_window = self.image_list_window
+        if list_window is None:
+            return
+        try:
+            list_window.apply_hyperlink_mode(bool(checked))
+        except RuntimeError:
+            self.image_list_window = None
+
+    def _on_list_hyperlink_mode_changed(self, checked: bool) -> None:
+        with QSignalBlocker(self.hyperlink_check):
+            self.hyperlink_check.setChecked(bool(checked))
+        self.settings.setValue("list_hyperlink_mode", bool(checked))
+        self._sync_preview_jump_buttons()
+
+    def _jump_from_preview(self, side: str) -> None:
+        if not self.hyperlink_check.isChecked():
+            return
+        item = self.state.current_item
+        if item is None:
+            return
+        start_excel_jump(
+            QApplication.activeWindow() or self,
+            item,
+            side,
+            self.state.workbook_paths,
+            error_cb=self.excel_jump_failed.emit,
+        )
+
+    def _sync_preview_jump_buttons(self) -> None:
+        buttons = {
+            "ref": self.ref_jump_button,
+            "a": self.a_jump_button,
+            "b": self.b_jump_button,
+            "c": self.c_jump_button,
+        }
+        enabled_mode = self.hyperlink_check.isChecked()
+        mode = self.state.mode
+        for side, button in buttons.items():
+            if side == "b" and mode not in {"triple", "quadra"}:
+                button.setEnabled(False)
+                continue
+            if side == "c" and mode != "quadra":
+                button.setEnabled(False)
+                continue
+            button.setEnabled(
+                enabled_mode and self._preview_jump_available(side)
+            )
+
+    def _preview_jump_available(self, side: str) -> bool:
+        item = self.state.current_item
+        if item is None:
+            return False
+        return (
+            jump_target_for_side(item, side, self.state.workbook_paths)
+            is not None
+        )
+
+    def _on_excel_jump_failed(self, message: str) -> None:
+        QMessageBox.warning(
+            QApplication.activeWindow() or self,
+            "Excel 열기",
+            message,
+        )
+
     def _open_image_list_window(self) -> None:
         if not self.state.flat_items:
             return
@@ -749,6 +822,9 @@ class MainWindow(QMainWindow):
                 self.image_list_window.raise_()
                 self.image_list_window.activateWindow()
                 self.image_list_window.focus_list()
+                self.image_list_window.apply_hyperlink_mode(
+                    self.hyperlink_check.isChecked()
+                )
                 return
             except RuntimeError:
                 self.image_list_window = None
@@ -767,6 +843,8 @@ class MainWindow(QMainWindow):
         window.finished.connect(
             lambda _result=0, owned=window: self._on_image_list_destroyed(owned)
         )
+        window.hyperlink_mode_changed.connect(self._on_list_hyperlink_mode_changed)
+        window.apply_hyperlink_mode(self.hyperlink_check.isChecked())
         window.show()
         window.raise_()
         window.activateWindow()
@@ -806,6 +884,9 @@ class MainWindow(QMainWindow):
             image,
             f"{role} · {extracted.location_text}",
             self,
+            jump_enabled=self.hyperlink_check.isChecked()
+            and self._preview_jump_available(side),
+            jump_callback=lambda: self._jump_from_preview(side),
         ).exec()
 
     def _show_help(self) -> None:

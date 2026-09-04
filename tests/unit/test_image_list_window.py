@@ -627,3 +627,171 @@ def test_hyperlink_mode_persists_and_respects_sheet_filter_and_missing_file(
         assert jumps[0][2] == "B1"
     finally:
         _close_window(second, qapp)
+
+
+def test_preview_jump_button_requires_hyperlink_mode_and_skips_missing_images(
+    qapp,
+    tmp_path: Path,
+    monkeypatch,
+    sample_items,
+):
+    _patch_list_settings(tmp_path, monkeypatch)
+    jumps = []
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    for path in sample_items["paths"].values():
+        Path(path).write_bytes(b"xlsx")
+
+    window = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        window.show()
+        qapp.processEvents()
+        assert window.ref_jump_button.text() == "엑셀 파형 바로가기"
+        assert window.ref_jump_button.isEnabled() is False
+        assert window.a_jump_button.isEnabled() is False
+
+        window.ref_jump_button.click()
+        assert jumps == []
+
+        window.hyperlink_check.setChecked(True)
+        qapp.processEvents()
+        assert window.ref_jump_button.isEnabled() is True
+        assert window.a_jump_button.isEnabled() is True
+
+        window.ref_jump_button.click()
+        assert len(jumps) == 1
+        assert jumps[0][2] == "A1"
+        assert jumps[0][0].endswith("reference.xlsx")
+
+        window.a_jump_button.click()
+        assert len(jumps) == 2
+        assert jumps[1][0].endswith("compare-a.xlsx")
+
+        QTest.keyClick(window.table, Qt.Key.Key_Down)
+        qapp.processEvents()
+        assert window.ref_jump_button.isEnabled() is True
+        assert window.a_jump_button.isEnabled() is False
+        window.a_jump_button.click()
+        assert len(jumps) == 2
+    finally:
+        _close_window(window, qapp)
+
+
+def test_quadra_preview_jump_buttons_open_b_and_c(
+    qapp,
+    tmp_path: Path,
+    monkeypatch,
+    sample_items,
+):
+    _patch_list_settings(tmp_path, monkeypatch)
+    jumps = []
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    for path in sample_items["paths"].values():
+        Path(path).write_bytes(b"xlsx")
+
+    window = ImageListWindow(
+        sample_items["quadra"],
+        "quadra",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        window.hyperlink_check.setChecked(True)
+        qapp.processEvents()
+        assert window.b_jump_button.isEnabled() is True
+        assert window.c_jump_button.isEnabled() is True
+        window.b_jump_button.click()
+        window.c_jump_button.click()
+        assert [item[2] for item in jumps] == ["A1", "A1"]
+        assert jumps[0][0].endswith("compare-b.xlsx")
+        assert jumps[1][0].endswith("compare-c.xlsx")
+    finally:
+        _close_window(window, qapp)
+
+
+def test_list_enlarge_jump_follows_hyperlink_mode(
+    qapp,
+    tmp_path: Path,
+    monkeypatch,
+    sample_items,
+):
+    _patch_list_settings(tmp_path, monkeypatch)
+    jumps = []
+    captured = {}
+
+    class FakeViewer:
+        def __init__(self, *args, **kwargs):
+            captured["kwargs"] = kwargs
+            captured["callback"] = kwargs.get("jump_callback")
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(dialogs_module, "ImageViewerDialog", FakeViewer)
+    monkeypatch.setattr(
+        dialogs_module,
+        "jump_to_excel_cell",
+        lambda path, sheet, cell, error_cb=None: jumps.append((path, sheet, cell)),
+    )
+    for path in sample_items["paths"].values():
+        Path(path).write_bytes(b"xlsx")
+
+    window = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        window.show()
+        qapp.processEvents()
+        window._enlarge("ref")
+        assert captured["kwargs"]["jump_enabled"] is False
+        captured["callback"]()
+        assert jumps == []
+
+        window.hyperlink_check.setChecked(True)
+        qapp.processEvents()
+        window._enlarge("a")
+        assert captured["kwargs"]["jump_enabled"] is True
+        captured["callback"]()
+        assert len(jumps) == 1
+        assert jumps[0][0].endswith("compare-a.xlsx")
+        assert jumps[0][2] == "A1"
+    finally:
+        _close_window(window, qapp)
+
+
+def test_list_preview_header_keeps_jump_button_at_right(qapp, sample_items):
+    from tests.unit.test_preview_pane import _assert_jump_button_at_right_edge
+
+    window = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        window.resize(1100, 800)
+        window.show()
+        qapp.processEvents()
+        _assert_jump_button_at_right_edge(
+            window.ref_container,
+            window.ref_meta,
+            window.ref_jump_button,
+            qapp,
+        )
+    finally:
+        _close_window(window, qapp)

@@ -28,3 +28,35 @@ def test_image_viewer_fits_very_wide_image_and_allows_zoom(qapp):
     finally:
         dialog.close()
         dialog.deleteLater()
+
+
+def test_jump_button_stays_disabled_without_callback(qapp):
+    dialog = ImageViewerDialog(Image.new("RGB", (40, 30), (10, 20, 30)), "확대")
+    try:
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.jump_button.text() == "엑셀 파형 바로가기"
+        assert dialog.jump_button.isEnabled() is False
+        dialog.jump_button.click()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_jump_button_calls_callback_when_enabled(qapp):
+    called = []
+    dialog = ImageViewerDialog(
+        Image.new("RGB", (40, 30), (10, 20, 30)),
+        "확대",
+        jump_enabled=True,
+        jump_callback=lambda: called.append("jump"),
+    )
+    try:
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.jump_button.isEnabled() is True
+        dialog.jump_button.click()
+        assert called == ["jump"]
+    finally:
+        dialog.close()
+        dialog.deleteLater()

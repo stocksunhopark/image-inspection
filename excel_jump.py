@@ -17,6 +17,7 @@ JumpTarget = Tuple[str, str, str]
 ErrorCallback = Callable[[str], None]
 
 _CELL_COLUMN_TO_SIDE = {3: "ref", 4: "a", 5: "b", 6: "c"}
+_SIDE_TO_COLUMN = {"ref": 3, "a": 4, "b": 5, "c": 6}
 _CELL_PATTERN = re.compile(r"^[A-Z]{1,3}\d{1,7}$", re.IGNORECASE)
 
 
@@ -48,6 +49,18 @@ def jump_target_for_list_cell(
     if not path:
         return None
     return (os.path.abspath(os.path.expanduser(path)), extracted.sheet_name, cell.upper())
+
+
+def jump_target_for_side(
+    item: InspectionItem,
+    side: str,
+    workbook_paths: Dict[str, str],
+) -> Optional[JumpTarget]:
+    """미리보기 칸(ref/a/b/c)에 해당하는 Excel 이동 대상을 반환한다."""
+    column = _SIDE_TO_COLUMN.get(str(side))
+    if column is None:
+        return None
+    return jump_target_for_list_cell(item, column, workbook_paths)
 
 
 def jump_to_excel_cell(
