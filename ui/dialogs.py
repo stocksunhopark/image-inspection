@@ -251,18 +251,23 @@ USAGE_HELP_TEXT = """OSC 파형 수동 비교기 사용 방법
 각 칸에 경로를 입력하거나, 파일을 끌어다 놓거나, [파일 선택]으로 지정합니다.
 • Excel Ref: 기준 파일
 • Excel 비교A / 비교B / 비교C: 나란히 볼 비교 파일
-비교 파일은 Ref와 같은 양식, 같은 시트 순서를 쓰는 것을 권장합니다.
+시트 수나 탭 순서가 달라도 사용할 수 있습니다. 프로그램은 시트 이름으로 연결합니다.
 메뉴 [파일] → [Ref Excel 선택...] (Ctrl+O)으로 Ref 파일만 고를 수도 있습니다.
 
 
 3. 이미지 불러오기
 필요한 파일을 모두 지정한 뒤 [이미지 불러오기] 또는 Ctrl+Enter를 누릅니다.
 불러오는 동안 [취소]로 중단할 수 있습니다.
+모든 Excel의 시트 이름 합집합을 Ref 순서 우선으로 구성합니다.
+정확한 시트 이름을 먼저 연결하고, 일대일로 명확할 때만 앞뒤 공백과 영문 대소문자를 보정합니다.
+한 파일에만 있는 시트와 이미지가 0개인 시트도 Review 목록에서 제외하지 않습니다.
 이미지는 픽셀을 비교하지 않고, 아래 순서로 같은 위치로 맞춰 묶습니다.
   1) 정확히 같은 셀
   2) 같은 병합영역
   3) 행·열이 각각 1칸 이내인 인접 셀
   4) 한쪽에만 있으면 다른 칸은 '이미지 없음'으로 표시
+해당 Excel에 시트 자체가 없으면 '시트 없음'으로 표시해 '이미지 없음'과 구분합니다.
+Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 누락·중복·역할 오배치가 있으면 Review를 시작하지 않습니다.
 
 
 4. 메인 화면에서 넘기기
@@ -271,7 +276,7 @@ USAGE_HELP_TEXT = """OSC 파형 수동 비교기 사용 방법
 • 왼쪽 방향키, PageUp: 이전
 • 오른쪽 방향키, PageDown, Space: 다음
 • Home: 처음 / End: 마지막
-• 상단 [시트] 목록: 전체 또는 특정 시트로 이동
+• 상단 [시트] 목록: 시트별 [REF + A], [REF ONLY], [C ONLY] 상태를 보고 이동
 • 슬라이더: 전체 위치 중 원하는 곳으로 바로 이동
 미리보기의 시트명·셀주소는 가운데에, [엑셀 파형 바로가기]는 오른쪽 끝에 있습니다.
 한쪽에만 이미지가 없어도 위치는 건너뛰지 않습니다.
@@ -296,7 +301,7 @@ USAGE_HELP_TEXT = """OSC 파형 수동 비교기 사용 방법
   - 메인·리스트 미리보기 오른쪽 끝의 [엑셀 파형 바로가기]
   - 확대 팝업 오른쪽 위의 [엑셀 파형 바로가기]
   - 전체, 시트, No. 칸을 더블클릭해도 Excel은 열리지 않습니다.
-  - '이미지 없음'은 열지 않습니다.
+  - '시트 없음'과 '이미지 없음'은 열지 않습니다.
   - 이미 Excel이 열려 있으면 새 창을 또 열지 않고, 그 창에서 해당 파일·칸으로 이동합니다.
   - 두 번째 이후에도 Excel 창이 맨 앞으로 올라옵니다.
 목록을 넘기는 속도는 하이퍼링크를 켜도 거의 같습니다. Excel은 더블클릭하거나 바로가기 버튼을 누른 순간에만 엽니다.
@@ -313,6 +318,7 @@ USAGE_HELP_TEXT = """OSC 파형 수동 비교기 사용 방법
 
 8. 참고
 • 이 프로그램은 유사도 점수, PASS/FAIL, 리포트를 만들지 않습니다.
+• 정상 로딩 결과는 원본 이미지 누락 0, 중복 0을 내부 검증한 결과입니다.
 • 선택한 Excel 경로와 창 위치는 다음에 열 때도 기억합니다.
 • 메뉴 [도움말] → [사용 방법]에서 이 안내를 다시 볼 수 있습니다.
 """
@@ -406,7 +412,7 @@ class ImageListWindow(QDialog):
         header.addSpacing(14)
         header.addWidget(QLabel("시트 선택"))
         self.sheet_combo = QComboBox()
-        self.sheet_combo.setMinimumWidth(230)
+        self.sheet_combo.setMinimumWidth(360)
         self.sheet_combo.setToolTip("목록에 표시할 Excel 시트를 선택합니다.")
         header.addWidget(self.sheet_combo)
         self.hyperlink_check = QCheckBox("하이퍼링크 모드")
@@ -560,24 +566,33 @@ class ImageListWindow(QDialog):
 
     @staticmethod
     def _cell_text(extracted: Optional[ExtractedImage]) -> str:
-        if extracted is None or extracted.is_null:
+        if extracted is None:
             return "이미지 없음"
+        if extracted.is_null:
+            return extracted.placeholder_text
         return extracted.cell_address
 
     def _populate_sheet_combo(self) -> None:
         counts: Dict[int, int] = {}
         names: Dict[int, str] = {}
+        statuses: Dict[int, str] = {}
+        empty_sheets = set()
         for item in self._all_items:
             counts[item.sheet_index] = counts.get(item.sheet_index, 0) + 1
             names.setdefault(item.sheet_index, item.sheet_name)
+            statuses.setdefault(item.sheet_index, item.sheet_status_text)
+            if item.is_empty_sheet:
+                empty_sheets.add(item.sheet_index)
         blocker = QSignalBlocker(self.sheet_combo)
         self.sheet_combo.clear()
         self.sheet_combo.addItem(
-            f"전체 시트 ({len(self._all_items)}개)", None
+            f"전체 시트 ({len(counts)}개) · Review {len(self._all_items)}개", None
         )
         for sheet_index in sorted(counts):
+            review_count = 0 if sheet_index in empty_sheets else counts[sheet_index]
             self.sheet_combo.addItem(
-                f"{sheet_index}. {names[sheet_index]} ({counts[sheet_index]}개)",
+                f"{sheet_index}. {names[sheet_index]} "
+                f"[{statuses[sheet_index]}] ({review_count}개)",
                 sheet_index,
             )
         del blocker
@@ -633,7 +648,7 @@ class ImageListWindow(QDialog):
             sheet_positions[item.sheet_index] = sheet_positions.get(item.sheet_index, 0) + 1
             values: List[str] = [
                 str(self._global_index_by_id[id(item)] + 1),
-                f"{item.sheet_index}. {item.sheet_name}",
+                f"{item.sheet_index}. {item.sheet_name} [{item.sheet_status_text}]",
                 f"{sheet_positions[item.sheet_index]}/{sheet_totals[item.sheet_index]}",
                 self._cell_text(item.image_ref),
                 self._cell_text(item.image_a),
@@ -826,7 +841,8 @@ class ImageListWindow(QDialog):
             )
         self.position_label.setText(position_text)
         self.location_label.setText(
-            f"시트 {item.sheet_index}. {item.sheet_name} · 시트 내 {item.index} · 기준 위치 {item.cell_address}"
+            f"시트 {item.sheet_index}. {item.sheet_name} [{item.sheet_status_text}] · "
+            f"시트 내 {item.index} · 기준 위치 {item.cell_address}"
         )
         self._set_preview_pane(
             self.ref_title,
@@ -932,7 +948,12 @@ class ImageListWindow(QDialog):
         meta_label.setToolTip(extracted.location_text)
         if extracted.is_null:
             image_label.setPixmap(None)
-            image_label.setText("해당 위치에 이미지가 없습니다.")
+            if extracted.placeholder_text == "시트 없음":
+                image_label.setText("현재 Excel에는 이 시트가 없습니다.")
+            elif extracted.cell_address == "-":
+                image_label.setText("이 시트에는 이미지가 없습니다.")
+            else:
+                image_label.setText("해당 위치에 이미지가 없습니다.")
             return
         image = load_extracted_pil(extracted)
         if image is None:

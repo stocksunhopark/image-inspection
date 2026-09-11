@@ -1,4 +1,4 @@
-"""Double/Triple Excel 로딩을 GUI 스레드 밖에서 실행하는 Qt worker."""
+"""Double/Triple/Quadra Excel 로딩을 GUI 스레드 밖에서 실행하는 Qt worker."""
 
 import threading
 from typing import Optional
@@ -36,7 +36,7 @@ class ExcelLoadWorker(QObject):
 
     def run(self) -> None:
         try:
-            items_by_sheet, preview_dir = load_inspection_images(
+            result = load_inspection_images(
                 self.path_ref,
                 self.path_a,
                 self.path_b,
@@ -58,7 +58,7 @@ class ExcelLoadWorker(QObject):
                 paths["b"] = self.path_b
             if self.path_c:
                 paths["c"] = self.path_c
-            self.finished.emit((items_by_sheet, preview_dir, mode, paths))
+            self.finished.emit((result, mode, paths))
         except InterruptedError:
             self.failed.emit("사용자 취소")
         except Exception as exc:

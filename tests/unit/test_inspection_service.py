@@ -13,8 +13,9 @@ from openpyxl.drawing.image import Image as XLImage
 from PIL import Image
 
 from excel_manager import load_extracted_pil
+import inspection_service as inspection_service_module
 from inspection_service import load_inspection_images
-from models import ExtractedImage, InspectionItem
+from models import MISSING_IMAGE, MISSING_SHEET, ExtractedImage, InspectionItem
 
 
 Color = Tuple[int, int, int]
@@ -403,7 +404,7 @@ def test_cancellation_raises_and_removes_partial_preview_directory(
     assert list(service_temp_root.iterdir()) == []
 
 
-def test_mismatched_sheet_tabs_are_rejected(tmp_path: Path):
+def test_mismatched_sheet_tabs_form_union_and_keep_empty_sheets(tmp_path: Path):
     ref = _write_workbook(
         tmp_path / "ref-mismatch.xlsx",
         {"MAIN": {"images": {"A1": (10, 20, 30)}}, "SECOND": {"images": {}}},
@@ -413,7 +414,212 @@ def test_mismatched_sheet_tabs_are_rejected(tmp_path: Path):
         {"MAIN": {"images": {"A1": (10, 20, 30)}}, "OTHER": {"images": {}}},
     )
 
-    with pytest.raises(ValueError, match="시트 탭 구성"):
+    result = load_inspection_images(str(ref), str(compare))
+    try:
+        assert list(result.items_by_sheet) == [1, 2, 3]
+        assert [
+            result.sheet_infos[index].display_name for index in result.sheet_infos
+        ] == ["MAIN", "SECOND", "OTHER"]
+        assert [
+            result.sheet_infos[index].status_text for index in result.sheet_infos
+        ] == ["REF + A", "REF ONLY", "A ONLY"]
+
+        second = result.items_by_sheet[2][0]
+        assert second.is_empty_sheet is True
+        assert second.image_ref.missing_reason == MISSING_IMAGE
+        assert second.image_a.missing_reason == MISSING_SHEET
+        assert second.image_ref.cell_address == "-"
+        assert second.image_a.cell_address == "-"
+
+        other = result.items_by_sheet[3][0]
+        assert other.is_empty_sheet is True
+        assert other.image_ref.missing_reason == MISSING_SHEET
+        assert other.image_a.missing_reason == MISSING_IMAGE
+
+        assert result.integrity_report.review_sheet_count == 3
+        assert result.integrity_report.source_image_count == 2
+        assert result.integrity_report.queue_image_count == 2
+    finally:
+        shutil.rmtree(result.preview_dir, ignore_errors=True)
+
+
+def test_triple_sheet_union_uses_ref_order_name_matching_and_role_statuses(
+    tmp_path: Path,
+):
+    ref = _write_workbook(
+        tmp_path / "ref-union.xlsx",
+        {
+            "ROOM": {"images": {"A1": (220, 20, 20)}},
+            "REF_ONLY": {"images": {"B2": (20, 220, 20)}},
+            "EMPTY": {"images": {}},
+        },
+    )
+    compare_a = _write_workbook(
+        tmp_path / "a-union.xlsx",
+        {
+            "A_ONLY": {"images": {"A3": (20, 20, 220)}},
+            "room": {"images": {"A1": (200, 40, 40)}},
+            "EMPTY": {"images": {}},
+        },
+    )
+    compare_b = _write_workbook(
+        tmp_path / "b-union.xlsx",
+        {
+            "B_ONLY": {"images": {"C4": (180, 20, 180)}},
+            "ROOM": {"images": {"A1": (180, 50, 50)}},
+            "REF_ONLY": {"images": {"B2": (50, 180, 50)}},
+        },
+    )
+
+    result = load_inspection_images(str(ref), str(compare_a), str(compare_b))
+    try:
+        assert [info.display_name for info in result.sheet_infos.values()] == [
+            "ROOM",
+            "REF_ONLY",
+            "EMPTY",
+            "A_ONLY",
+            "B_ONLY",
+        ]
+        assert [info.status_text for info in result.sheet_infos.values()] == [
+            "REF + A + B",
+            "REF + B",
+            "REF + A",
+            "A ONLY",
+            "B ONLY",
+        ]
+
+        room = result.items_by_sheet[1][0]
+        assert room.image_ref.sheet_name == "ROOM"
+        assert room.image_a.sheet_name == "room"
+        assert room.image_b is not None
+        assert room.image_b.sheet_name == "ROOM"
+
+        ref_only = result.items_by_sheet[2][0]
+        assert ref_only.image_a.missing_reason == MISSING_SHEET
+        assert ref_only.image_b is not None
+        assert ref_only.image_b.is_null is False
+
+        empty = result.items_by_sheet[3][0]
+        assert empty.is_empty_sheet is True
+        assert empty.image_ref.missing_reason == MISSING_IMAGE
+        assert empty.image_a.missing_reason == MISSING_IMAGE
+        assert empty.image_b is not None
+        assert empty.image_b.missing_reason == MISSING_SHEET
+
+        assert result.integrity_report.role_sheet_counts == (
+            ("ref", 3),
+            ("a", 3),
+            ("b", 3),
+        )
+        assert result.integrity_report.review_sheet_count == 5
+        assert result.integrity_report.source_image_count == 7
+        assert result.integrity_report.queue_image_count == 7
+        source_ids = [
+            image.source_image_id
+            for item in _all_items(result.items_by_sheet)
+            for _role, image in item.source_images()
+        ]
+        assert len(source_ids) == len(set(source_ids)) == 7
+    finally:
+        shutil.rmtree(result.preview_dir, ignore_errors=True)
+
+
+def test_quadra_sheet_union_keeps_c_only_sheet_and_missing_roles(tmp_path: Path):
+    ref = _write_workbook(
+        tmp_path / "ref-quad-union.xlsx",
+        {"ROOM": {"images": {"A1": (220, 20, 20)}}},
+    )
+    compare_a = _write_workbook(
+        tmp_path / "a-quad-union.xlsx",
+        {"A_ONLY": {"images": {"B2": (20, 220, 20)}}},
+    )
+    compare_b = _write_workbook(
+        tmp_path / "b-quad-union.xlsx",
+        {"ROOM": {"images": {"A1": (20, 20, 220)}}},
+    )
+    compare_c = _write_workbook(
+        tmp_path / "c-quad-union.xlsx",
+        {"C_ONLY": {"images": {"C3": (180, 20, 180)}}},
+    )
+
+    result = load_inspection_images(
+        str(ref), str(compare_a), str(compare_b), str(compare_c)
+    )
+    try:
+        assert [info.display_name for info in result.sheet_infos.values()] == [
+            "ROOM",
+            "A_ONLY",
+            "C_ONLY",
+        ]
+        assert [info.status_text for info in result.sheet_infos.values()] == [
+            "REF + B",
+            "A ONLY",
+            "C ONLY",
+        ]
+        c_only = result.items_by_sheet[3][0]
+        assert c_only.image_ref.missing_reason == MISSING_SHEET
+        assert c_only.image_a.missing_reason == MISSING_SHEET
+        assert c_only.image_b is not None
+        assert c_only.image_b.missing_reason == MISSING_SHEET
+        assert c_only.image_c is not None
+        assert c_only.image_c.is_null is False
+        assert result.integrity_report.source_image_count == 4
+    finally:
+        shutil.rmtree(result.preview_dir, ignore_errors=True)
+
+
+def test_ambiguous_normalized_sheet_names_stay_separate_with_warning(
+    tmp_path: Path,
+):
+    ref = _write_workbook(
+        tmp_path / "ref-ambiguous.xlsx",
+        {
+            "ROOM": {"images": {"A1": (220, 20, 20)}},
+            "ROOM ": {"images": {"B2": (20, 220, 20)}},
+        },
+    )
+    compare = _write_workbook(
+        tmp_path / "a-ambiguous.xlsx",
+        {"room": {"images": {"C3": (20, 20, 220)}}},
+    )
+
+    result = load_inspection_images(str(ref), str(compare))
+    try:
+        assert len(result.sheet_infos) == 3
+        assert [info.status_text for info in result.sheet_infos.values()] == [
+            "REF ONLY",
+            "REF ONLY",
+            "A ONLY",
+        ]
+        assert len(result.warnings) == 1
+        assert "모호" in result.warnings[0]
+        assert result.integrity_report.source_image_count == 3
+    finally:
+        shutil.rmtree(result.preview_dir, ignore_errors=True)
+
+
+def test_integrity_check_rejects_duplicate_queue_source_image(
+    tmp_path: Path,
+    monkeypatch,
+):
+    ref = _write_workbook(
+        tmp_path / "ref-integrity.xlsx",
+        {"MAIN": {"images": {"A1": (220, 20, 20)}}},
+    )
+    compare = _write_workbook(
+        tmp_path / "a-integrity.xlsx",
+        {"MAIN": {"images": {"A1": (20, 220, 20)}}},
+    )
+    original_align = inspection_service_module._align_positions
+
+    def duplicate_first_row(*args, **kwargs):
+        rows = original_align(*args, **kwargs)
+        return rows + [rows[0]]
+
+    monkeypatch.setattr(
+        inspection_service_module, "_align_positions", duplicate_first_row
+    )
+    with pytest.raises(ValueError, match="중복/추가 Source Image ID"):
         load_inspection_images(str(ref), str(compare))
 
 

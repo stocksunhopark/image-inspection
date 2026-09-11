@@ -168,10 +168,15 @@ def extract_image_objects_by_position(worksheet) -> Dict[Position, object]:
     objects: Dict[Position, object] = {}
     if worksheet is None:
         return objects
-    for image_obj in getattr(worksheet, "_images", []):
+    for image_number, image_obj in enumerate(
+        getattr(worksheet, "_images", []), start=1
+    ):
         anchor = getattr(image_obj, "anchor", None)
         if not hasattr(anchor, "_from"):
-            continue
+            raise ValueError(
+                f"'{worksheet.title}' 시트의 {image_number}번째 이미지 위치를 "
+                "읽을 수 없습니다. 이미지 누락을 방지하기 위해 검토를 중단합니다."
+            )
         position = (anchor._from.row, anchor._from.col)
         if position in objects:
             cell = f"{get_column_letter(position[1] + 1)}{position[0] + 1}"
@@ -183,7 +188,15 @@ def extract_image_objects_by_position(worksheet) -> Dict[Position, object]:
     return objects
 
 
-def extract_image_meta(worksheet, sheet_index: int, image_obj) -> ExtractedImage:
+def extract_image_meta(
+    worksheet,
+    sheet_index: int,
+    image_obj,
+    *,
+    source_role: Optional[str] = None,
+    source_sheet_id: Optional[str] = None,
+    source_image_id: Optional[str] = None,
+) -> ExtractedImage:
     anchor = image_obj.anchor._from
     row1, col1 = anchor.row + 1, anchor.col + 1
     return ExtractedImage(
@@ -193,23 +206,38 @@ def extract_image_meta(worksheet, sheet_index: int, image_obj) -> ExtractedImage
         merged_range=find_merged_range(worksheet, row1, col1),
         anchor_row=anchor.row,
         anchor_col=anchor.col,
+        source_role=source_role,
+        source_sheet_id=source_sheet_id,
+        source_image_id=source_image_id,
     )
 
 
 def make_null_image(
     sheet_index: int,
     sheet_name: str,
-    row: int,
-    col: int,
+    row: Optional[int],
+    col: Optional[int],
+    *,
+    source_role: Optional[str] = None,
+    source_sheet_id: Optional[str] = None,
+    missing_reason: Optional[str] = None,
 ) -> ExtractedImage:
+    cell_address = (
+        f"{get_column_letter(col + 1)}{row + 1}"
+        if row is not None and col is not None
+        else "-"
+    )
     return ExtractedImage(
         sheet_index=sheet_index,
         sheet_name=sheet_name,
-        cell_address=f"{get_column_letter(col + 1)}{row + 1}",
+        cell_address=cell_address,
         merged_range="",
-        anchor_row=row,
-        anchor_col=col,
+        anchor_row=row if row is not None else -1,
+        anchor_col=col if col is not None else -1,
         is_null=True,
+        source_role=source_role,
+        source_sheet_id=source_sheet_id,
+        missing_reason=missing_reason,
     )
 
 

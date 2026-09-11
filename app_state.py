@@ -1,9 +1,9 @@
-"""Qt에 의존하지 않는 Double/Triple 이미지 탐색 상태."""
+"""Qt에 의존하지 않는 Double/Triple/Quadra 이미지 탐색 상태."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
-from models import SUPPORTED_MODES, InspectionItem
+from models import IntegrityReport, SUPPORTED_MODES, InspectionItem, SheetInfo
 
 
 @dataclass
@@ -13,6 +13,9 @@ class AppState:
     current_index: int = -1
     workbook_paths: Dict[str, str] = field(default_factory=dict)
     preview_temp_dir: Optional[str] = None
+    sheet_infos: Dict[int, SheetInfo] = field(default_factory=dict)
+    integrity_report: Optional[IntegrityReport] = None
+    load_warnings: List[str] = field(default_factory=list)
     _flat_items: List[InspectionItem] = field(
         default_factory=list, init=False, repr=False
     )
@@ -35,6 +38,9 @@ class AppState:
         mode: str,
         workbook_paths: Optional[Dict[str, str]] = None,
         preview_temp_dir: Optional[str] = None,
+        sheet_infos: Optional[Dict[int, SheetInfo]] = None,
+        integrity_report: Optional[IntegrityReport] = None,
+        load_warnings: Optional[Sequence[str]] = None,
     ) -> None:
         if mode not in SUPPORTED_MODES:
             raise ValueError(f"지원하지 않는 검사 모드: {mode}")
@@ -45,6 +51,9 @@ class AppState:
         }
         self.workbook_paths = dict(workbook_paths or {})
         self.preview_temp_dir = preview_temp_dir
+        self.sheet_infos = dict(sheet_infos or {})
+        self.integrity_report = integrity_report
+        self.load_warnings = list(load_warnings or ())
         self._flat_items = [
             item
             for sheet_index in sorted(self.items_by_sheet)
@@ -57,6 +66,9 @@ class AppState:
         self.current_index = -1
         self.workbook_paths = {}
         self.preview_temp_dir = None
+        self.sheet_infos = {}
+        self.integrity_report = None
+        self.load_warnings = []
         self._flat_items = []
 
     def move(self, offset: int) -> bool:

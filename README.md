@@ -12,7 +12,11 @@ Excel 통합 문서에 삽입된 이미지를 추출해, 같은 시트·셀 위�
 - **Double 모드**: Excel Ref와 비교A, 총 2개 파일을 나란히 표시
 - **Triple 모드**: Excel Ref, 비교A, 비교B, 총 3개 파일을 나란히 표시
 - **Quadra 모드**: Excel Ref, 비교A, 비교B, 비교C, 총 4개 파일을 나란히 표시
-- 기존 테스트 양식과 같은 시트 탭 순서 및 이미지 앵커 구조 지원
+- 파일마다 시트 수·이름·탭 순서가 달라도 시트 이름 합집합 전체를 검토
+- 정확한 시트 이름 우선, 일대일로 명확할 때 공백·영문 대소문자 보정 매칭
+- Ref 시트 순서를 유지하고 Ref에 없는 A/B/C 전용 시트를 역할 순서대로 추가
+- 시트별 `[REF + A]`, `[REF + B]`, `[A ONLY]`, `[C ONLY]` 존재 상태 표시
+- `시트 없음`과 `이미지 없음`을 구분하고 이미지 0개 시트도 Review 화면에 포함
 - 동일 셀 → 동일 병합영역 → 인접 셀(±1행/열) 순으로 표시 위치 정렬
 - 시트 선택, 처음/이전/다음/마지막 이동, 전체 위치 슬라이더
 - `리스트실행` 별도 창에서 전체 이미지 위치 목록과 이미지를 동시에 확인
@@ -23,6 +27,7 @@ Excel 통합 문서에 삽입된 이미지를 추출해, 같은 시트·셀 위�
 - 방향키, PageUp/PageDown, Home/End, Space 키 탐색
 - 이미지 클릭 시 창맞춤·확대·축소 가능한 원본 보기
 - 한 Excel에만 이미지가 있는 위치도 누락하지 않고 빈 칸과 함께 표시
+- 역할별 Sheet 관계와 Source Image ID를 검사해 Queue 누락·중복·오배치 차단
 
 ## 요구 사항
 
@@ -57,8 +62,22 @@ python excel_image_inspector_gui.py
 5. `리스트실행`을 누르면 전체 위치 목록과 이미지를 한 창에서 볼 수 있습니다.
 6. 이미지를 클릭하면 확대 창이 열립니다.
 
-지원 파일은 `.xlsx`, `.xlsm`입니다. 비교 파일은 기존 테스트에 사용한 것처럼
-같은 양식과 시트 순서를 사용하는 것을 권장합니다.
+지원 파일은 `.xlsx`, `.xlsm`입니다. 파일들의 시트 수나 순서가 달라도 사용할 수
+있으며, 같은 시트는 이미지 내용이 아닌 시트 이름을 기준으로 연결합니다.
+
+## 시트 합집합과 무결성
+
+Double은 Ref/A, Triple은 Ref/A/B, Quadra는 Ref/A/B/C에 존재하는 모든 시트의
+합집합을 Review 대상으로 사용합니다. Ref의 탭 순서를 먼저 유지하고, Ref에 없는
+시트는 A, B, C에서 처음 발견되는 순서대로 뒤에 추가합니다.
+
+Review Queue 생성 직후 원본 Sheet의 역할 관계와 각 이미지의 고유 Source Image
+ID를 검증합니다. 원본 이미지는 올바른 역할 열에 정확히 한 번만 배치되어야 하며,
+`시트 없음`과 `이미지 없음` placeholder는 원본 이미지 수와 배치 횟수 집계에서
+제외합니다. Sheet/Image 누락, 중복 또는 역할 오배치가 하나라도 발견되면 Review를
+시작하지 않고 상세 오류를 표시합니다. 정상적으로 불러온 경우 상태 표시줄과 시트
+구성 안내에서 원본 이미지 수, Queue 배치 수, `누락 0 / 중복 0` 결과를 확인할 수
+있습니다.
 
 ## 위치 정렬 방식
 
@@ -76,7 +95,7 @@ python excel_image_inspector_gui.py
 excel_image_inspector_gui.py  # 프로그램 진입점
 models.py                     # 추출 이미지와 검사 위치 모델
 excel_manager.py              # Excel 이미지 위치/원본 bytes 추출
-inspection_service.py         # Double/Triple 위치 정렬 및 로딩
+inspection_service.py         # 시트 합집합, Double/Triple/Quadra 정렬 및 무결성 검사
 app_state.py                  # 현재 시트/위치 탐색 상태
 workers.py                    # 백그라운드 Excel 로딩
 ui/main_window.py             # 메인 검사 화면

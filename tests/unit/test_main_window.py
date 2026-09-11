@@ -6,7 +6,7 @@ from PIL import Image
 from PyQt6.QtCore import QSettings
 
 import ui.main_window as main_window_module
-from models import ExtractedImage, InspectionItem
+from models import MISSING_SHEET, ExtractedImage, InspectionItem, SheetInfo
 
 
 def _extracted(
@@ -131,6 +131,60 @@ def test_triple_shows_third_image_and_marks_input_mode_change(
         window.double_check.setChecked(True)
         assert "현재 화면은 이전 Triple 결과" in window.status_label.text()
         assert not window.b_container.isHidden()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_main_shows_sheet_role_status_and_sheet_missing_message(
+    qapp, tmp_path, monkeypatch
+):
+    ref_path = _png(tmp_path / "ref-only.png", (200, 20, 20))
+    info = SheetInfo(
+        sheet_index=1,
+        display_name="REF_ONLY",
+        selected_roles=("ref", "a"),
+        role_sheet_names={"ref": "REF_ONLY", "a": None},
+        role_sheet_ids={"ref": "ref-sheet", "a": None},
+    )
+    ref_image = _extracted(
+        ref_path, sheet_index=1, sheet_name="REF_ONLY", cell="A1"
+    )
+    missing_a = ExtractedImage(
+        sheet_index=1,
+        sheet_name="REF_ONLY",
+        cell_address="A1",
+        merged_range="",
+        anchor_row=0,
+        anchor_col=0,
+        is_null=True,
+        source_role="a",
+        missing_reason=MISSING_SHEET,
+    )
+    item = InspectionItem(
+        sheet_index=1,
+        index=1,
+        image_ref=ref_image,
+        image_a=missing_a,
+        sheet_info=info,
+    )
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        window.state.set_items(
+            {1: [item]},
+            mode="double",
+            workbook_paths={"ref": "ref.xlsx", "a": "a.xlsx"},
+            sheet_infos={1: info},
+        )
+        window._populate_sheet_combo()
+        window._render_current()
+        qapp.processEvents()
+
+        assert "REF_ONLY [REF ONLY]" in window.sheet_combo.itemText(0)
+        assert "REF_ONLY [REF ONLY]" in window.location_label.text()
+        assert "시트 없음" in window.a_meta.text()
+        assert window.a_image.text() == "현재 Excel에는 이 시트가 없습니다."
     finally:
         window.close()
         window.deleteLater()

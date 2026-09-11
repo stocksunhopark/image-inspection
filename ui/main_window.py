@@ -160,7 +160,7 @@ class MainWindow(QMainWindow):
         top_navigation = QHBoxLayout()
         top_navigation.addWidget(QLabel("시트"))
         self.sheet_combo = QComboBox()
-        self.sheet_combo.setMinimumWidth(210)
+        self.sheet_combo.setMinimumWidth(320)
         self.sheet_combo.currentIndexChanged.connect(self._select_sheet)
         top_navigation.addWidget(self.sheet_combo)
         self.hyperlink_check = QCheckBox("하이퍼링크 모드")
@@ -470,7 +470,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_load_finished(self, payload) -> None:
-        items_by_sheet, preview_dir, mode, paths = payload
+        result, mode, paths = payload
+        items_by_sheet = result.items_by_sheet
+        preview_dir = result.preview_dir
         self._close_image_list_window()
         self._owned_temp_dirs.add(os.path.realpath(preview_dir))
         old_temp_dir = self.state.preview_temp_dir
@@ -479,18 +481,71 @@ class MainWindow(QMainWindow):
             mode=mode,
             workbook_paths=paths,
             preview_temp_dir=preview_dir,
+            sheet_infos=result.sheet_infos,
+            integrity_report=result.integrity_report,
+            load_warnings=result.warnings,
         )
         self._cleanup_temp_dir(old_temp_dir)
         self._populate_sheet_combo()
         self._apply_preview_mode(mode)
         self.progress_bar.setValue(100)
         total = len(self.state.flat_items)
-        if total:
-            self._set_status(f"완료: {total}개 위치를 불러왔습니다.", busy=False)
-        else:
-            self._set_status("삽입 이미지가 없습니다.", busy=False)
+        report = result.integrity_report
+        self._set_status(
+            f"완료: {report.review_sheet_count}개 시트 · {total}개 Review 화면 · "
+            f"원본 이미지 {report.source_image_count}개 · 무결성 정상",
+            busy=False,
+        )
         self._render_current()
         self._save_settings()
+        self._show_sheet_summary_if_needed()
+
+    def _show_sheet_summary_if_needed(self) -> None:
+        report = self.state.integrity_report
+        infos = list(self.state.sheet_infos.values())
+        if report is None or not infos:
+            return
+        selected_role_count = len(report.role_sheet_counts)
+        has_mismatch = any(
+            len(info.present_roles) != selected_role_count for info in infos
+        )
+        if not has_mismatch and not self.state.load_warnings:
+            return
+
+        role_lines = [
+            f"{role.upper() if role != 'ref' else 'REF'} : {count}개 시트"
+            for role, count in report.role_sheet_counts
+        ]
+        all_common = sum(
+            len(info.present_roles) == selected_role_count for info in infos
+        )
+        partial = sum(
+            1 < len(info.present_roles) < selected_role_count for info in infos
+        )
+        single = sum(len(info.present_roles) == 1 for info in infos)
+        message = "\n".join(
+            [
+                f"{mode_label(self.state.mode)} Mode",
+                "",
+                *role_lines,
+                "",
+                f"전체 검토 대상 : {report.review_sheet_count}개 시트",
+                f"전체 파일 공통 : {all_common}개",
+                f"일부 파일 공통 : {partial}개",
+                f"단독 시트 : {single}개",
+                "",
+                f"전체 원본 이미지 : {report.source_image_count}개",
+                f"Queue 배치 이미지 : {report.queue_image_count}개",
+                "누락 : 0 / 중복 : 0",
+            ]
+        )
+        if self.state.load_warnings:
+            message += "\n\n이름 확인 안내\n" + "\n".join(
+                f"- {warning}" for warning in self.state.load_warnings
+            )
+            QMessageBox.warning(self, "시트 구성 및 무결성 안내", message)
+        else:
+            QMessageBox.information(self, "시트 구성 및 무결성 안내", message)
 
     def _on_load_failed(self, message: str) -> None:
         previous = self._previous_result_text()
@@ -554,8 +609,12 @@ class MainWindow(QMainWindow):
                 rows = self.state.items_by_sheet[sheet_index]
                 if not rows:
                     continue
+                info = self.state.sheet_infos.get(sheet_index)
+                sheet_name = info.display_name if info is not None else rows[0].sheet_name
+                status = info.status_text if info is not None else rows[0].sheet_status_text
+                review_count = 0 if all(row.is_empty_sheet for row in rows) else len(rows)
                 self.sheet_combo.addItem(
-                    f"{sheet_index}. {rows[0].sheet_name} ({len(rows)}개)",
+                    f"{sheet_index}. {sheet_name} [{status}] ({review_count}개)",
                     sheet_index,
                 )
 
@@ -619,7 +678,8 @@ class MainWindow(QMainWindow):
         sheet_position, sheet_total = self.state.current_sheet_position()
         self.position_label.setText(f"전체 {current + 1} / {total}")
         self.location_label.setText(
-            f"시트 {item.sheet_index} · 시트 내 {sheet_position}/{sheet_total} · 기준 위치 {item.cell_address}"
+            f"시트 {item.sheet_index}. {item.sheet_name} [{item.sheet_status_text}] · "
+            f"시트 내 {sheet_position}/{sheet_total} · 기준 위치 {item.cell_address}"
         )
         with QSignalBlocker(self.position_slider):
             self.position_slider.setRange(0, max(0, total - 1))
@@ -719,7 +779,12 @@ class MainWindow(QMainWindow):
         meta_label.setToolTip(extracted.location_text)
         if extracted.is_null:
             image_label.setPixmap(None)
-            image_label.setText("해당 위치에 이미지가 없습니다.")
+            if extracted.placeholder_text == "시트 없음":
+                image_label.setText("현재 Excel에는 이 시트가 없습니다.")
+            elif extracted.cell_address == "-":
+                image_label.setText("이 시트에는 이미지가 없습니다.")
+            else:
+                image_label.setText("해당 위치에 이미지가 없습니다.")
             return
         image = load_extracted_pil(extracted)
         if image is None:

@@ -13,7 +13,13 @@ from PyQt6.QtWidgets import QApplication
 
 import ui.dialogs as dialogs_module
 import ui.main_window as main_window_module
-from models import ExtractedImage, InspectionItem
+from models import (
+    MISSING_IMAGE,
+    MISSING_SHEET,
+    ExtractedImage,
+    InspectionItem,
+    SheetInfo,
+)
 from ui.dialogs import ImageListWindow
 
 
@@ -355,7 +361,7 @@ def test_sheet_selector_filters_rows_and_keeps_arrow_navigation_in_sheet(
 
         assert window.sheet_combo.count() == 3
         assert window.sheet_combo.itemData(0) is None
-        assert "전체 시트 (3개)" == window.sheet_combo.itemText(0)
+        assert "전체 시트 (2개) · Review 3개" == window.sheet_combo.itemText(0)
         assert window.sheet_combo.itemData(1) == 1
         assert "(2개)" in window.sheet_combo.itemText(1)
         assert window.sheet_combo.itemData(2) == 2
@@ -390,6 +396,97 @@ def test_sheet_selector_filters_rows_and_keeps_arrow_navigation_in_sheet(
         assert window.table.rowCount() == 3
         assert window.table.currentRow() == 2
         assert "B1" in window.ref_meta.text()
+    finally:
+        _close_window(window, qapp)
+
+
+def test_list_distinguishes_sheet_missing_image_missing_and_empty_sheet(
+    qapp,
+    tmp_path: Path,
+):
+    ref_image = _real_image(tmp_path, "ref-only", 1, "A1", (220, 20, 20))
+    ref_only_info = SheetInfo(
+        sheet_index=1,
+        display_name="REF_ONLY",
+        selected_roles=("ref", "a"),
+        role_sheet_names={"ref": "REF_ONLY", "a": None},
+        role_sheet_ids={"ref": "ref-sheet", "a": None},
+    )
+    ref_image.sheet_name = "REF_ONLY"
+    sheet_missing = ExtractedImage(
+        sheet_index=1,
+        sheet_name="REF_ONLY",
+        cell_address="A1",
+        merged_range="",
+        anchor_row=0,
+        anchor_col=0,
+        is_null=True,
+        missing_reason=MISSING_SHEET,
+    )
+    ref_only_item = InspectionItem(
+        sheet_index=1,
+        index=1,
+        image_ref=ref_image,
+        image_a=sheet_missing,
+        sheet_info=ref_only_info,
+    )
+
+    empty_info = SheetInfo(
+        sheet_index=2,
+        display_name="EMPTY",
+        selected_roles=("ref", "a"),
+        role_sheet_names={"ref": "EMPTY", "a": "EMPTY"},
+        role_sheet_ids={"ref": "ref-empty", "a": "a-empty"},
+    )
+    empty_ref = ExtractedImage(
+        sheet_index=2,
+        sheet_name="EMPTY",
+        cell_address="-",
+        merged_range="",
+        anchor_row=-1,
+        anchor_col=-1,
+        is_null=True,
+        missing_reason=MISSING_IMAGE,
+    )
+    empty_a = ExtractedImage(
+        sheet_index=2,
+        sheet_name="EMPTY",
+        cell_address="-",
+        merged_range="",
+        anchor_row=-1,
+        anchor_col=-1,
+        is_null=True,
+        missing_reason=MISSING_IMAGE,
+    )
+    empty_item = InspectionItem(
+        sheet_index=2,
+        index=1,
+        image_ref=empty_ref,
+        image_a=empty_a,
+        sheet_info=empty_info,
+        is_empty_sheet=True,
+    )
+
+    window = ImageListWindow(
+        [ref_only_item, empty_item],
+        "double",
+        {"ref": "ref.xlsx", "a": "a.xlsx"},
+    )
+    try:
+        window.show()
+        qapp.processEvents()
+        assert "REF_ONLY [REF ONLY]" in window.sheet_combo.itemText(1)
+        assert window.table.item(0, 4).text() == "시트 없음"
+        assert "시트 없음" in window.a_meta.text()
+        assert window.a_image.text() == "현재 Excel에는 이 시트가 없습니다."
+
+        window.sheet_combo.setCurrentIndex(2)
+        qapp.processEvents()
+        assert "EMPTY [REF + A] (0개)" in window.sheet_combo.itemText(2)
+        assert window.table.item(0, 3).text() == "이미지 없음"
+        assert window.table.item(0, 4).text() == "이미지 없음"
+        assert window.ref_image.text() == "이 시트에는 이미지가 없습니다."
+        assert window.a_image.text() == "이 시트에는 이미지가 없습니다."
     finally:
         _close_window(window, qapp)
 
