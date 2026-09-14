@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 import os
 import shutil
@@ -29,6 +29,13 @@ from models import (
     ROLE_ORDER,
     SheetInfo,
 )
+from sheet_mapping import (
+    SheetMappingPlan,
+    SheetMappingSource,
+    build_automatic_sheet_mapping,
+    make_source_sheet_id,
+    validate_sheet_mapping_plan,
+)
 
 ProgressCallback = Callable[[int, int, str], None]
 StatusCallback = Callable[[str], None]
@@ -53,6 +60,7 @@ class _SourceSheet:
 @dataclass
 class _SheetGroup:
     sources: Dict[str, _SourceSheet] = field(default_factory=dict)
+    display_name: str = ""
     matching_warning: str = ""
 
 
@@ -225,90 +233,76 @@ def _validated_path(path: str, label: str) -> str:
     return normalized
 
 
-def _normalized_sheet_name(name: str) -> str:
-    """정확 일치가 없을 때만 사용하는 최소 보정 키."""
-    return str(name).strip().casefold()
-
-
-def _make_source_sheet_id(role: str, original_index: int, name: str) -> str:
-    return f"{role}|sheet:{original_index}|name:{name!r}"
-
-
 def _build_sheet_groups(
-    workbooks: Sequence[object], roles: Tuple[str, ...]
+    workbooks: Sequence[object],
+    roles: Tuple[str, ...],
+    sheet_mapping: Optional[SheetMappingPlan] = None,
 ) -> Tuple[List[_SheetGroup], List[_SourceSheet], Tuple[str, ...]]:
-    """정확 이름 우선, 명확한 정규화 이름 보조로 Sheet 합집합을 만든다."""
-    groups: List[_SheetGroup] = []
-    exact_groups: Dict[str, _SheetGroup] = {}
+    """자동 또는 사용자 지정 계획으로 Sheet 합집합을 만든다."""
     source_sheets: List[_SourceSheet] = []
-
-    # 역할 순서대로 발견하므로 Ref 순서가 먼저 유지되고 A/B/C 전용 시트가
-    # 각 원본 탭 순서대로 뒤에 추가된다.
+    sheet_names_by_role: Dict[str, List[Tuple[int, str]]] = {}
     for role, workbook in zip(roles, workbooks):
+        sheet_names_by_role[role] = []
         for original_index, worksheet in enumerate(workbook.worksheets, start=1):
+            sheet_names_by_role[role].append((original_index, worksheet.title))
             source = _SourceSheet(
                 role=role,
                 original_index=original_index,
                 name=worksheet.title,
                 worksheet=worksheet,
-                source_sheet_id=_make_source_sheet_id(
+                source_sheet_id=make_source_sheet_id(
                     role, original_index, worksheet.title
                 ),
             )
             source_sheets.append(source)
-            exact_group = exact_groups.get(source.name)
-            if exact_group is not None and role not in exact_group.sources:
-                exact_group.sources[role] = source
-                continue
-            group = _SheetGroup(sources={role: source})
-            groups.append(group)
-            exact_groups.setdefault(source.name, group)
 
-    buckets: Dict[str, List[_SheetGroup]] = defaultdict(list)
-    for group in groups:
-        first_source = next(iter(group.sources.values()))
-        buckets[_normalized_sheet_name(first_source.name)].append(group)
-
-    removed_group_ids = set()
-    warnings: List[str] = []
-    for normalized_name, bucket in buckets.items():
-        if len(bucket) <= 1:
-            continue
-        role_counts = Counter(
-            role for group in bucket for role in group.sources
+    actual_sources = tuple(
+        SheetMappingSource(
+            role=source.role,
+            original_index=source.original_index,
+            name=source.name,
+            source_sheet_id=source.source_sheet_id,
         )
-        if all(count == 1 for count in role_counts.values()):
-            target = bucket[0]
-            for other in bucket[1:]:
-                target.sources.update(other.sources)
-                removed_group_ids.add(id(other))
-            continue
-
-        details = []
-        for role in roles:
-            names = [
-                source.name
-                for group in bucket
-                for source_role, source in group.sources.items()
-                if source_role == role
-            ]
-            if names:
-                details.append(
-                    f"{ROLE_LABELS[role]}: " + ", ".join(repr(name) for name in names)
-                )
-        warning = (
-            f"시트 이름 '{normalized_name}'의 공백/대소문자 보정 결과가 "
-            f"모호하여 자동 매칭하지 않았습니다 ({'; '.join(details)})."
-        )
-        warnings.append(warning)
-        for group in bucket:
-            group.matching_warning = warning
-
-    return (
-        [group for group in groups if id(group) not in removed_group_ids],
-        source_sheets,
-        tuple(warnings),
+        for source in source_sheets
     )
+    plan = sheet_mapping or build_automatic_sheet_mapping(
+        sheet_names_by_role, roles
+    )
+    validate_sheet_mapping_plan(plan, actual_sources, roles)
+    source_by_id = {
+        source.source_sheet_id: source for source in source_sheets
+    }
+    active_planned_groups = [group for group in plan.groups if group.enabled]
+    active_source_ids = {
+        source_id
+        for group in active_planned_groups
+        for source_id in group.role_sheet_ids.values()
+    }
+    groups = [
+        _SheetGroup(
+            sources={
+                role: source_by_id[source_id]
+                for role, source_id in planned.role_sheet_ids.items()
+            },
+            display_name=planned.display_name,
+            matching_warning=planned.matching_warning,
+        )
+        for planned in active_planned_groups
+    ]
+    active_source_sheets = [
+        source
+        for source in source_sheets
+        if source.source_sheet_id in active_source_ids
+    ]
+    active_warning_texts = {
+        group.matching_warning
+        for group in active_planned_groups
+        if group.matching_warning
+    }
+    active_warnings = tuple(
+        warning for warning in plan.warnings if warning in active_warning_texts
+    )
+    return groups, active_source_sheets, active_warnings
 
 
 def _make_sheet_info(
@@ -319,7 +313,7 @@ def _make_sheet_info(
     display_source = next(group.sources[role] for role in roles if role in group.sources)
     return SheetInfo(
         sheet_index=sheet_index,
-        display_name=display_source.name,
+        display_name=group.display_name or display_source.name,
         selected_roles=roles,
         role_sheet_names={
             role: group.sources[role].name if role in group.sources else None
@@ -451,13 +445,6 @@ def _validate_review_queue(
                 errors.append(
                     f"{sheet_index}. {info.display_name}: 원본 Sheet 이름 관계가 다릅니다."
                 )
-            if _normalized_sheet_name(source.name) != _normalized_sheet_name(
-                info.display_name
-            ):
-                errors.append(
-                    f"{sheet_index}. {info.display_name}: 이름이 다른 원본 Sheet "
-                    f"{source.name!r}이 연결되었습니다."
-                )
 
     missing_sheets = expected_sheet_ids - queue_sheet_ids
     duplicate_sheets = queue_sheet_ids - expected_sheet_ids
@@ -585,6 +572,7 @@ def load_inspection_images(
     path_b: Optional[str] = None,
     path_c: Optional[str] = None,
     *,
+    sheet_mapping: Optional[SheetMappingPlan] = None,
     progress_cb: Optional[ProgressCallback] = None,
     status_cb: Optional[StatusCallback] = None,
     cancel_cb: Optional[CancelCallback] = None,
@@ -621,7 +609,7 @@ def load_inspection_images(
         if status_cb is not None:
             status_cb("시트 이름 기준으로 전체 Review 목록 구성 중...")
         sheet_groups, source_sheets, warnings = _build_sheet_groups(
-            workbooks, roles
+            workbooks, roles, sheet_mapping
         )
 
         sheet_contexts = []

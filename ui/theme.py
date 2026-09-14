@@ -1,4 +1,11 @@
+from pathlib import Path
+
 from PyQt6.QtWidgets import QWidget
+
+
+_COMBO_ARROW_PATH = (
+    Path(__file__).resolve().parent / "assets" / "combo_down_arrow.svg"
+).as_posix()
 
 
 MAIN_WINDOW_STYLESHEET = """
@@ -64,6 +71,27 @@ QLineEdit, QComboBox {
     padding: 6px;
     color: #e2e8f0;
     selection-background-color: #2563eb;
+}
+QComboBox {
+    padding: 6px 36px 6px 8px;
+}
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 28px;
+    background-color: #162033;
+    border: none;
+    border-left: 1px solid #334155;
+    border-top-right-radius: 7px;
+    border-bottom-right-radius: 7px;
+}
+QComboBox::drop-down:hover {
+    background-color: #1e293b;
+}
+QComboBox::down-arrow {
+    image: url("__COMBO_ARROW_PATH__");
+    width: 9px;
+    height: 6px;
 }
 QComboBox QAbstractItemView {
     background-color: #0f172a;
@@ -154,7 +182,7 @@ QMenuBar::item:selected, QMenu::item:selected {
     color: white;
 }
 QSplitter::handle { background-color: #243246; width: 2px; }
-"""
+""".replace("__COMBO_ARROW_PATH__", _COMBO_ARROW_PATH)
 
 
 def apply_theme(widget: QWidget) -> None:

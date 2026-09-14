@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -28,7 +29,12 @@ from PyQt6.QtWidgets import (
 from app_state import AppState
 from excel_jump import jump_target_for_side
 from excel_manager import load_extracted_pil
-from models import SUPPORTED_MODES, ExtractedImage, mode_label
+from models import ROLE_ORDER, SUPPORTED_MODES, ExtractedImage, mode_label
+from sheet_mapping import (
+    SheetMappingPlan,
+    build_sheet_mapping_from_paths,
+    sheet_mapping_input_signature,
+)
 from ui.dialogs import (
     ImageListWindow,
     ImageViewerDialog,
@@ -37,6 +43,7 @@ from ui.dialogs import (
     start_excel_jump,
 )
 from ui.helpers import pil_to_pixmap
+from ui.sheet_mapping_dialog import SheetMappingDialog
 from ui.theme import apply_theme
 from ui.widgets import ClickableLabel, DropLineEdit
 from workers import ExcelLoadWorker
@@ -54,6 +61,8 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("excel-image-inspector", "gui")
         self.load_thread: Optional[QThread] = None
         self.load_worker: Optional[ExcelLoadWorker] = None
+        self._sheet_mapping_plan: Optional[SheetMappingPlan] = None
+        self._sheet_mapping_signature = None
         self.image_list_window: Optional[ImageListWindow] = None
         self._close_pending = False
         self._owned_temp_dirs = set()
@@ -137,11 +146,17 @@ class MainWindow(QMainWindow):
         action_row = QHBoxLayout()
         self.load_button = QPushButton("이미지 불러오기")
         self.cancel_button = QPushButton("취소")
+        self.sheet_mapping_button = QPushButton("시트순서설정")
+        self.sheet_mapping_button.setToolTip(
+            "현재 자동 시트 매핑과 실행 순서를 확인하거나 수정합니다."
+        )
         self.cancel_button.setEnabled(False)
         self.load_button.clicked.connect(self._start_loading)
         self.cancel_button.clicked.connect(self._cancel_loading)
+        self.sheet_mapping_button.clicked.connect(self._open_sheet_mapping)
         action_row.addWidget(self.load_button)
         action_row.addWidget(self.cancel_button)
+        action_row.addWidget(self.sheet_mapping_button)
         action_row.addStretch(1)
         self.status_label = QLabel("Excel 파일을 선택해 주세요.")
         self.status_label.setObjectName("statusIdle")
@@ -408,36 +423,31 @@ class MainWindow(QMainWindow):
     def _start_loading(self) -> None:
         if self.load_thread is not None:
             return
-        mode = self._selected_mode()
-        path_ref = self.file_ref_edit.text().strip()
-        path_a = self.file_a_edit.text().strip()
-        path_b = (
-            self.file_b_edit.text().strip()
-            if mode in {"triple", "quadra"}
+        mode, paths, missing = self._input_paths()
+        if self._warn_for_missing_inputs(missing):
+            return
+
+        path_ref = paths["ref"]
+        path_a = paths["a"]
+        path_b = paths.get("b")
+        path_c = paths.get("c")
+        signature = sheet_mapping_input_signature(paths, tuple(paths))
+        sheet_mapping = (
+            self._sheet_mapping_plan
+            if self._sheet_mapping_signature == signature
             else None
         )
-        path_c = self.file_c_edit.text().strip() if mode == "quadra" else None
-        missing = []
-        if not path_ref:
-            missing.append("Excel Ref")
-        if not path_a:
-            missing.append("Excel 비교A")
-        if mode in {"triple", "quadra"} and not path_b:
-            missing.append("Excel 비교B")
-        if mode == "quadra" and not path_c:
-            missing.append("Excel 비교C")
-        if missing:
-            QMessageBox.warning(
-                self,
-                "입력 확인",
-                "다음 파일을 선택해 주세요: " + ", ".join(missing),
-            )
-            return
 
         self._set_loading(True)
         self.progress_bar.setValue(0)
         self._set_status("이미지 로딩 준비 중...", busy=True)
-        worker = ExcelLoadWorker(path_ref, path_a, path_b, path_c)
+        worker = ExcelLoadWorker(
+            path_ref,
+            path_a,
+            path_b,
+            path_c,
+            sheet_mapping=sheet_mapping,
+        )
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -454,6 +464,72 @@ class MainWindow(QMainWindow):
         self.load_worker = worker
         self.load_thread = thread
         thread.start()
+
+    def _input_paths(self):
+        mode = self._selected_mode()
+        paths = {
+            "ref": self.file_ref_edit.text().strip(),
+            "a": self.file_a_edit.text().strip(),
+        }
+        if mode in {"triple", "quadra"}:
+            paths["b"] = self.file_b_edit.text().strip()
+        if mode == "quadra":
+            paths["c"] = self.file_c_edit.text().strip()
+        labels = {
+            "ref": "Excel Ref",
+            "a": "Excel 비교A",
+            "b": "Excel 비교B",
+            "c": "Excel 비교C",
+        }
+        missing = [labels[role] for role, path in paths.items() if not path]
+        return mode, paths, missing
+
+    def _warn_for_missing_inputs(self, missing) -> bool:
+        if not missing:
+            return False
+        QMessageBox.warning(
+            self,
+            "입력 확인",
+            "다음 파일을 선택해 주세요: " + ", ".join(missing),
+        )
+        return True
+
+    def _open_sheet_mapping(self) -> None:
+        if self.load_thread is not None:
+            return
+        _mode, paths, missing = self._input_paths()
+        if self._warn_for_missing_inputs(missing):
+            return
+        roles = ROLE_ORDER[: len(paths)]
+        try:
+            automatic_plan = build_sheet_mapping_from_paths(paths, roles)
+            signature = sheet_mapping_input_signature(paths, roles)
+        except Exception as exc:
+            QMessageBox.critical(self, "시트 정보 오류", str(exc))
+            return
+
+        current_plan = (
+            self._sheet_mapping_plan
+            if self._sheet_mapping_signature == signature
+            and self._sheet_mapping_plan is not None
+            else automatic_plan
+        )
+        dialog = SheetMappingDialog(current_plan, automatic_plan, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if dialog.result_plan is None:
+            return
+        self._sheet_mapping_plan = dialog.result_plan.clone()
+        self._sheet_mapping_signature = signature
+        enabled_count = sum(
+            group.enabled for group in self._sheet_mapping_plan.groups
+        )
+        self._set_status(
+            f"시트 구성 적용됨: 활성 비교 그룹 "
+            f"{enabled_count}/{len(self._sheet_mapping_plan.groups)}개 · "
+            "이미지 불러오기를 눌러 주세요.",
+            busy=False,
+        )
 
     def _cancel_loading(self) -> None:
         if self.load_worker is None:
@@ -590,6 +666,7 @@ class MainWindow(QMainWindow):
             self.file_b_button,
             self.file_c_button,
             self.load_button,
+            self.sheet_mapping_button,
         ):
             widget.setEnabled(not loading)
         self.cancel_button.setEnabled(loading)

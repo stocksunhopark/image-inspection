@@ -266,6 +266,27 @@ def test_mode_checkboxes_are_exclusive(qapp, tmp_path, monkeypatch):
         window.deleteLater()
 
 
+def test_main_has_sheet_order_button_next_to_loading_controls(
+    qapp, tmp_path, monkeypatch
+):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show()
+        qapp.processEvents()
+        assert window.load_button.text() == "이미지 불러오기"
+        assert window.cancel_button.text() == "취소"
+        assert window.sheet_mapping_button.text() == "시트순서설정"
+        assert window.sheet_mapping_button.isEnabled()
+
+        window._set_loading(True)
+        assert not window.sheet_mapping_button.isEnabled()
+        window._set_loading(False)
+        assert window.sheet_mapping_button.isEnabled()
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_usage_help_covers_modes_list_and_hyperlink(qapp):
     from ui.dialogs import USAGE_HELP_TEXT, UsageHelpDialog
 
@@ -278,6 +299,9 @@ def test_usage_help_covers_modes_list_and_hyperlink(qapp):
     assert "오른쪽 끝" in USAGE_HELP_TEXT
     assert "PASS/FAIL" in USAGE_HELP_TEXT
     assert "Ctrl+Enter" in USAGE_HELP_TEXT
+    assert "시트순서설정" in USAGE_HELP_TEXT
+    assert "자동 매핑 복원" in USAGE_HELP_TEXT
+    assert "비교 그룹 추가" in USAGE_HELP_TEXT
     dialog = UsageHelpDialog()
     try:
         assert dialog.windowTitle() == "사용 방법"

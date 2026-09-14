@@ -6,6 +6,7 @@ from typing import Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from inspection_service import load_inspection_images
+from sheet_mapping import SheetMappingPlan
 
 
 class ExcelLoadWorker(QObject):
@@ -20,12 +21,14 @@ class ExcelLoadWorker(QObject):
         path_a: str,
         path_b: Optional[str] = None,
         path_c: Optional[str] = None,
+        sheet_mapping: Optional[SheetMappingPlan] = None,
     ):
         super().__init__()
         self.path_ref = path_ref
         self.path_a = path_a
         self.path_b = path_b
         self.path_c = path_c
+        self.sheet_mapping = sheet_mapping.clone() if sheet_mapping else None
         self._stop_event = threading.Event()
 
     def request_stop(self) -> None:
@@ -41,6 +44,7 @@ class ExcelLoadWorker(QObject):
                 self.path_a,
                 self.path_b,
                 self.path_c,
+                sheet_mapping=self.sheet_mapping,
                 progress_cb=lambda current, total, cell: self.progress.emit(
                     current, total, cell
                 ),

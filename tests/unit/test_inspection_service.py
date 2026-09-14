@@ -16,6 +16,8 @@ from excel_manager import load_extracted_pil
 import inspection_service as inspection_service_module
 from inspection_service import load_inspection_images
 from models import MISSING_IMAGE, MISSING_SHEET, ExtractedImage, InspectionItem
+from sheet_mapping import SheetMappingGroup, build_sheet_mapping_from_paths
+from ui.sheet_mapping_dialog import SheetMappingDialog
 
 
 Color = Tuple[int, int, int]
@@ -439,6 +441,218 @@ def test_mismatched_sheet_tabs_form_union_and_keep_empty_sheets(tmp_path: Path):
         assert result.integrity_report.review_sheet_count == 3
         assert result.integrity_report.source_image_count == 2
         assert result.integrity_report.queue_image_count == 2
+    finally:
+        shutil.rmtree(result.preview_dir, ignore_errors=True)
+
+
+def test_custom_sheet_mapping_groups_different_names_and_controls_order(
+    tmp_path: Path,
+):
+    ref = _write_workbook(
+        tmp_path / "ref-custom.xlsx",
+        {
+            "MAIN": {"images": {"A1": (10, 20, 30)}},
+            "CLK": {"images": {"B2": (40, 50, 60)}},
+        },
+    )
+    compare = _write_workbook(
+        tmp_path / "a-custom.xlsx",
+        {
+            "MAIN": {"images": {"A1": (70, 80, 90)}},
+            "Clock": {"images": {"B2": (100, 110, 120)}},
+        },
+    )
+    paths = {"ref": str(ref), "a": str(compare)}
+    plan = build_sheet_mapping_from_paths(paths, ("ref", "a"))
+    source_ids = {
+        (source.role, source.name): source.source_sheet_id
+        for source in plan.sources
+    }
+    plan.groups = [
+        SheetMappingGroup(
+            display_name="CLK 사용자 비교",
+            role_sheet_ids={
+                "ref": source_ids[("ref", "CLK")],
+                "a": source_ids[("a", "Clock")],
+            },
+        ),
+        SheetMappingGroup(
+            display_name="MAIN",
+            role_sheet_ids={
+                "ref": source_ids[("ref", "MAIN")],
+                "a": source_ids[("a", "MAIN")],
+            },
+        ),
+    ]
+
+    result = load_inspection_images(
+        str(ref), str(compare), sheet_mapping=plan
+    )
+    try:
+        assert [info.display_name for info in result.sheet_infos.values()] == [
+            "CLK 사용자 비교",
+            "MAIN",
+        ]
+        assert result.sheet_infos[1].role_sheet_names == {
+            "ref": "CLK",
+            "a": "Clock",
+        }
+        assert result.sheet_infos[1].status_text == "REF + A"
+        assert result.items_by_sheet[1][0].image_ref.sheet_name == "CLK"
+        assert result.items_by_sheet[1][0].image_a.sheet_name == "Clock"
+        assert result.integrity_report.source_image_count == 4
+        assert result.integrity_report.queue_image_count == 4
+    finally:
+        shutil.rmtree(result.preview_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        ("ref", "a"),
+        ("ref", "a", "b"),
+        ("ref", "a", "b", "c"),
+    ],
+    ids=["double", "triple", "quadra"],
+)
+def test_custom_mapping_loads_real_embedded_images_in_every_mode(
+    tmp_path: Path, roles: Tuple[str, ...], qapp
+):
+    colors = {
+        "ref": (210, 20, 20),
+        "a": (20, 210, 20),
+        "b": (20, 20, 210),
+        "c": (210, 210, 20),
+    }
+    sheet_names = {
+        "ref": "REF_DIFFERENT",
+        "a": "A_DIFFERENT",
+        "b": "B_DIFFERENT",
+        "c": "C_DIFFERENT",
+    }
+    paths = {
+        role: str(
+            _write_workbook(
+                tmp_path / f"{role}.xlsx",
+                {
+                    sheet_names[role]: {
+                        "images": {"A1": colors[role]}
+                    }
+                },
+            )
+        )
+        for role in roles
+    }
+    automatic = build_sheet_mapping_from_paths(paths, roles)
+    source_ids = {
+        source.role: source.source_sheet_id for source in automatic.sources
+    }
+    original_groups = [
+        (group.display_name, dict(group.role_sheet_ids))
+        for group in automatic.groups
+    ]
+    dialog = SheetMappingDialog(automatic, automatic)
+    try:
+        dialog._add_group()
+        custom_group = dialog._plan.groups[-1]
+        for role in roles:
+            dialog._assign_source(custom_group, role, source_ids[role])
+
+        assert custom_group.display_name == "새 비교 그룹 1"
+        assert [
+            (group.display_name, dict(group.role_sheet_ids))
+            for group in dialog._plan.groups[:-1]
+        ] == original_groups
+
+        dialog._accept_mapping()
+        assert dialog.result_plan is not None
+        plan = dialog.result_plan
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+    positional_paths = [paths[role] for role in roles]
+
+    result = load_inspection_images(
+        *positional_paths, sheet_mapping=plan
+    )
+    try:
+        assert list(result.items_by_sheet) == [1]
+        assert result.sheet_infos[1].display_name == "새 비교 그룹 1"
+        assert result.sheet_infos[1].role_sheet_names == {
+            role: sheet_names[role] for role in roles
+        }
+        item = result.items_by_sheet[1][0]
+        assert tuple(role for role, _image in item.side_images()) == roles
+        for role, extracted in item.side_images():
+            assert extracted.is_null is False
+            assert extracted.sheet_name == sheet_names[role]
+            image = load_extracted_pil(extracted)
+            assert image is not None
+            assert image.getpixel((0, 0)) == colors[role]
+        assert result.integrity_report.source_image_count == len(roles)
+        assert result.integrity_report.queue_image_count == len(roles)
+    finally:
+        shutil.rmtree(result.preview_dir, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    "roles",
+    [
+        ("ref", "a"),
+        ("ref", "a", "b"),
+        ("ref", "a", "b", "c"),
+    ],
+    ids=["double", "triple", "quadra"],
+)
+def test_inactive_mapping_group_skips_real_images_in_every_mode(
+    tmp_path: Path, roles: Tuple[str, ...]
+):
+    active_colors = {
+        "ref": (201, 11, 11),
+        "a": (11, 201, 11),
+        "b": (11, 11, 201),
+        "c": (201, 201, 11),
+    }
+    paths = {
+        role: str(
+            _write_workbook(
+                tmp_path / f"{role}-activation.xlsx",
+                {
+                    "ACTIVE": {"images": {"A1": active_colors[role]}},
+                    "SKIPPED": {"images": {"B2": (90, 90, 90)}},
+                },
+            )
+        )
+        for role in roles
+    }
+    plan = build_sheet_mapping_from_paths(paths, roles)
+    assert [group.display_name for group in plan.groups] == [
+        "ACTIVE",
+        "SKIPPED",
+    ]
+    plan.groups[1].enabled = False
+
+    result = load_inspection_images(
+        *(paths[role] for role in roles),
+        sheet_mapping=plan,
+    )
+    try:
+        assert list(result.items_by_sheet) == [1]
+        assert list(result.sheet_infos) == [1]
+        assert result.sheet_infos[1].display_name == "ACTIVE"
+        item = result.items_by_sheet[1][0]
+        for role, extracted in item.side_images():
+            image = load_extracted_pil(extracted)
+            assert image is not None
+            assert extracted.sheet_name == "ACTIVE"
+            assert image.getpixel((0, 0)) == active_colors[role]
+        assert result.integrity_report.role_sheet_counts == tuple(
+            (role, 1) for role in roles
+        )
+        assert result.integrity_report.review_sheet_count == 1
+        assert result.integrity_report.source_image_count == len(roles)
+        assert result.integrity_report.queue_image_count == len(roles)
     finally:
         shutil.rmtree(result.preview_dir, ignore_errors=True)
 
