@@ -2,7 +2,8 @@
 
 import os
 import zipfile
-from typing import Dict, List, Optional, Tuple
+from collections import Counter
+from typing import Dict, List, Optional, Tuple, Union
 from xml.etree.ElementTree import ParseError, fromstring
 
 from openpyxl import load_workbook
@@ -12,6 +13,34 @@ from PIL import Image
 from models import ExtractedImage
 
 Position = Tuple[int, int]
+ImageKey = Tuple[int, int, int]
+PositionKey = Union[Position, ImageKey]
+
+
+def image_anchor_position(key: PositionKey) -> Position:
+    """이미지 고유 키에서 실제 Excel 앵커 셀 위치만 반환한다."""
+    return key[0], key[1]
+
+
+def image_occurrence(key: PositionKey) -> int:
+    """같은 앵커 셀 안에서의 1-based 이미지 순번을 반환한다."""
+    return key[2] if len(key) >= 3 else 1
+
+
+def image_key_sort(key: PositionKey) -> Tuple[int, int, int]:
+    row, col = image_anchor_position(key)
+    return row, col, image_occurrence(key)
+
+
+def duplicate_anchor_counts(
+    objects: Dict[PositionKey, object],
+) -> Dict[Position, int]:
+    counts = Counter(image_anchor_position(key) for key in objects)
+    return {
+        position: count
+        for position, count in counts.items()
+        if count > 1
+    }
 
 
 def _xml_local_name(tag: str) -> str:
@@ -78,14 +107,14 @@ def merged_origin_0based(worksheet, row0: int, col0: int) -> Position:
 
 
 def pair_image_positions(
-    objects_a: Dict[Position, object],
-    objects_b: Dict[Position, object],
+    objects_a: Dict[PositionKey, object],
+    objects_b: Dict[PositionKey, object],
     worksheet_a=None,
     worksheet_b=None,
     row_slop: int = 1,
     col_slop: int = 1,
     cancel_cb=None,
-) -> List[Tuple[Optional[Position], Optional[Position]]]:
+) -> List[Tuple[Optional[PositionKey], Optional[PositionKey]]]:
     """두 Excel의 이미지 앵커를 구조적으로 짝짓는다.
 
     픽셀이나 PASS/FAIL을 비교하지 않는다. 동일 셀, 같은 병합영역, 인접 셀
@@ -93,38 +122,41 @@ def pair_image_positions(
     """
     unused_a = set(objects_a)
     unused_b = set(objects_b)
-    pairs: List[Tuple[Optional[Position], Optional[Position]]] = []
+    pairs: List[Tuple[Optional[PositionKey], Optional[PositionKey]]] = []
 
     def raise_if_cancelled() -> None:
         if cancel_cb is not None and cancel_cb():
             raise InterruptedError("사용자 취소")
 
-    for position in sorted(unused_a & unused_b):
+    for position in sorted(unused_a & unused_b, key=image_key_sort):
         raise_if_cancelled()
         pairs.append((position, position))
         unused_a.remove(position)
         unused_b.remove(position)
 
-    origins_b: Dict[Position, List[Position]] = {}
+    origins_b: Dict[Position, List[PositionKey]] = {}
     for position in unused_b:
         raise_if_cancelled()
+        anchor_b = image_anchor_position(position)
         origins_b.setdefault(
-            merged_origin_0based(worksheet_b, *position), []
+            merged_origin_0based(worksheet_b, *anchor_b), []
         ).append(position)
     for positions in origins_b.values():
-        positions.sort()
+        positions.sort(key=image_key_sort)
 
-    for position_a in sorted(list(unused_a)):
+    for position_a in sorted(list(unused_a), key=image_key_sort):
         raise_if_cancelled()
-        origin = merged_origin_0based(worksheet_a, *position_a)
+        anchor_a = image_anchor_position(position_a)
+        origin = merged_origin_0based(worksheet_a, *anchor_a)
         candidates = [p for p in origins_b.get(origin, []) if p in unused_b]
         if not candidates:
             continue
         position_b = min(
             candidates,
             key=lambda p: (
-                abs(p[0] - position_a[0]) + abs(p[1] - position_a[1]),
-                p,
+                abs(p[0] - anchor_a[0]) + abs(p[1] - anchor_a[1]),
+                abs(image_occurrence(p) - image_occurrence(position_a)),
+                image_key_sort(p),
             ),
         )
         pairs.append((position_a, position_b))
@@ -136,14 +168,28 @@ def pair_image_positions(
     candidates = []
     for position_a in unused_a:
         raise_if_cancelled()
+        anchor_a = image_anchor_position(position_a)
         for position_b in unused_b:
             raise_if_cancelled()
-            row_delta = position_b[0] - position_a[0]
-            col_delta = position_b[1] - position_a[1]
+            anchor_b = image_anchor_position(position_b)
+            row_delta = anchor_b[0] - anchor_a[0]
+            col_delta = anchor_b[1] - anchor_a[1]
             if abs(row_delta) <= row_slop and abs(col_delta) <= col_slop:
-                priority = (abs(col_delta), abs(row_delta), row_delta, col_delta)
+                priority = (
+                    abs(col_delta),
+                    abs(row_delta),
+                    abs(image_occurrence(position_b) - image_occurrence(position_a)),
+                    row_delta,
+                    col_delta,
+                )
                 candidates.append((priority, position_a, position_b))
-    candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+    candidates.sort(
+        key=lambda item: (
+            item[0],
+            image_key_sort(item[1]),
+            image_key_sort(item[2]),
+        )
+    )
     for _priority, position_a, position_b in candidates:
         raise_if_cancelled()
         if position_a not in unused_a or position_b not in unused_b:
@@ -152,22 +198,30 @@ def pair_image_positions(
         unused_a.remove(position_a)
         unused_b.remove(position_b)
 
-    pairs.extend((position, None) for position in sorted(unused_a))
-    pairs.extend((None, position) for position in sorted(unused_b))
+    pairs.extend(
+        (position, None)
+        for position in sorted(unused_a, key=image_key_sort)
+    )
+    pairs.extend(
+        (None, position)
+        for position in sorted(unused_b, key=image_key_sort)
+    )
     pairs.sort(
-        key=lambda pair: pair[0]
-        if pair[0] is not None
-        else pair[1]
-        if pair[1] is not None
-        else (10**9, 10**9)
+        key=lambda pair: image_key_sort(
+            pair[0] if pair[0] is not None else pair[1]
+        )
+        if pair[0] is not None or pair[1] is not None
+        else (10**9, 10**9, 10**9)
     )
     return pairs
 
 
-def extract_image_objects_by_position(worksheet) -> Dict[Position, object]:
-    objects: Dict[Position, object] = {}
+def extract_image_objects_by_position(worksheet) -> Dict[ImageKey, object]:
+    """시트의 모든 삽입 이미지를 앵커 셀과 셀 내 순번으로 보존한다."""
+    objects: Dict[ImageKey, object] = {}
     if worksheet is None:
         return objects
+    occurrences: Counter[Position] = Counter()
     for image_number, image_obj in enumerate(
         getattr(worksheet, "_images", []), start=1
     ):
@@ -178,13 +232,9 @@ def extract_image_objects_by_position(worksheet) -> Dict[Position, object]:
                 "읽을 수 없습니다. 이미지 누락을 방지하기 위해 검토를 중단합니다."
             )
         position = (anchor._from.row, anchor._from.col)
-        if position in objects:
-            cell = f"{get_column_letter(position[1] + 1)}{position[0] + 1}"
-            raise ValueError(
-                f"'{worksheet.title}' 시트의 {cell} 위치에 이미지가 2개 이상 있습니다. "
-                "각 이미지를 서로 다른 셀 위치에 배치해 주세요."
-            )
-        objects[position] = image_obj
+        occurrences[position] += 1
+        key = (position[0], position[1], occurrences[position])
+        objects[key] = image_obj
     return objects
 
 
@@ -196,6 +246,8 @@ def extract_image_meta(
     source_role: Optional[str] = None,
     source_sheet_id: Optional[str] = None,
     source_image_id: Optional[str] = None,
+    anchor_occurrence: int = 1,
+    anchor_count: int = 1,
 ) -> ExtractedImage:
     anchor = image_obj.anchor._from
     row1, col1 = anchor.row + 1, anchor.col + 1
@@ -209,6 +261,8 @@ def extract_image_meta(
         source_role=source_role,
         source_sheet_id=source_sheet_id,
         source_image_id=source_image_id,
+        anchor_occurrence=anchor_occurrence,
+        anchor_count=anchor_count,
     )
 
 
@@ -265,7 +319,7 @@ def persist_source_from_obj(
     extension = guess_image_extension(raw)
     filename = (
         f"s{extracted.sheet_index}_r{extracted.anchor_row}_c{extracted.anchor_col}"
-        f"_{side}{extension}"
+        f"_o{extracted.anchor_occurrence}_{side}{extension}"
     )
     path = os.path.join(preview_dir, filename)
     with open(path, "wb") as file_handle:

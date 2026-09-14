@@ -25,6 +25,21 @@ def test_exact_positions_pair_one_to_one():
     assert pairs == [((10, 3), (10, 3)), ((20, 3), (20, 3))]
 
 
+def test_duplicate_anchor_keys_pair_by_occurrence_without_dropping_extra():
+    objs_a = {
+        (10, 3, 1): "a-first",
+        (10, 3, 2): "a-second",
+    }
+    objs_b = {(10, 3, 1): "b-first"}
+
+    pairs = pair_image_positions(objs_a, objs_b)
+
+    assert pairs == [
+        ((10, 3, 1), (10, 3, 1)),
+        ((10, 3, 2), None),
+    ]
+
+
 def test_same_merged_origin_pairs_shifted_cell_inside_merge():
     # 같은 병합 D271:J290 (1-based row 271-290, col 4-10) 안에서 한 칸 내려간 앵커.
     merge = _Merge(271, 4, 290, 10)

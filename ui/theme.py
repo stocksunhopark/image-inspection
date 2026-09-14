@@ -64,12 +64,16 @@ QGroupBox::title {
     left: 12px;
     padding: 0 6px;
 }
-QLineEdit, QComboBox {
+QLineEdit, QComboBox, QPlainTextEdit {
     background-color: #0f172a;
     border: 1px solid #334155;
     border-radius: 8px;
     padding: 6px;
     color: #e2e8f0;
+    selection-background-color: #2563eb;
+}
+QPlainTextEdit {
+    padding: 8px;
     selection-background-color: #2563eb;
 }
 QComboBox {
@@ -131,6 +135,31 @@ QPushButton:disabled {
     background-color: #334155;
     border-color: #334155;
     color: #94a3b8;
+}
+QPushButton#memoButton {
+    background-color: #334155;
+    border-color: #475569;
+    padding: 5px 9px;
+}
+QPushButton#memoButton[hasNote="true"] {
+    background-color: #075985;
+    border-color: #38bdf8;
+    color: #e0f2fe;
+}
+QPushButton#memoDeleteButton {
+    background-color: #7f1d1d;
+    border-color: #ef4444;
+}
+QWidget#reviewPreviewContainer[defectMarked="true"] {
+    border: 2px solid #ef4444;
+    border-radius: 9px;
+}
+QWidget#reviewPreviewContainer[defectMarked="true"] QCheckBox#defectCheck {
+    color: #fca5a5;
+}
+QLabel#reviewCountLabel {
+    color: #7dd3fc;
+    font-weight: 700;
 }
 QCheckBox {
     spacing: 6px;

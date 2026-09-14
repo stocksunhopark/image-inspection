@@ -1,6 +1,7 @@
 """육안 검사 화면에서 사용하는 확대 창과 이미지 리스트 창."""
 
 import os
+from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image
@@ -12,6 +13,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QFileDialog,
     QHeaderView,
     QHBoxLayout,
     QLabel,
@@ -30,6 +32,11 @@ from PyQt6.QtWidgets import (
 from excel_jump import jump_target_for_list_cell, jump_target_for_side, jump_to_excel_cell
 from excel_manager import load_extracted_pil
 from models import SUPPORTED_MODES, ExtractedImage, InspectionItem, mode_label
+from review_annotations import (
+    ROLE_DISPLAY_NAMES,
+    ReviewAnnotationStore,
+    export_annotations_xlsx,
+)
 from ui.helpers import pil_to_pixmap
 from ui.widgets import ClickableLabel
 
@@ -204,6 +211,132 @@ def create_preview_pane(
     return container, title, metadata, image, jump_button
 
 
+def create_review_preview_pane(
+    default_title: str,
+) -> Tuple[
+    QWidget,
+    QLabel,
+    QLabel,
+    ClickableLabel,
+    QCheckBox,
+    QPushButton,
+    QPushButton,
+]:
+    """리스트 창용 불량·메모 컨트롤이 포함된 미리보기 칸."""
+    container, title, metadata, image, jump_button = create_preview_pane(
+        default_title
+    )
+    container.setObjectName("reviewPreviewContainer")
+    defect_check = QCheckBox("불량")
+    defect_check.setObjectName("defectCheck")
+    defect_check.setToolTip("이 이미지가 불량일 때만 체크합니다.")
+    memo_button = QPushButton("메모")
+    memo_button.setObjectName("memoButton")
+    memo_button.setToolTip("불량 체크와 관계없이 메모를 작성할 수 있습니다.")
+    metadata_row = container.layout().itemAt(1).layout()
+    metadata_row.insertWidget(
+        1, defect_check, 0, Qt.AlignmentFlag.AlignVCenter
+    )
+    metadata_row.insertWidget(
+        2, memo_button, 0, Qt.AlignmentFlag.AlignVCenter
+    )
+    return (
+        container,
+        title,
+        metadata,
+        image,
+        defect_check,
+        memo_button,
+        jump_button,
+    )
+
+
+class ReviewMemoDialog(QDialog):
+    """이미지를 보면서 독립적으로 작성하는 10줄 메모 플로팅 창."""
+
+    def __init__(
+        self,
+        title: str,
+        note: str,
+        save_callback: Callable[[str], None],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._save_callback = save_callback
+        self._last_saved = note
+        self.setWindowTitle("검토 메모")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.resize(560, 360)
+        self.setMinimumSize(460, 300)
+
+        layout = QVBoxLayout(self)
+        heading = QLabel(title)
+        heading.setObjectName("locationLabel")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        hint = QLabel(
+            "불량 체크와 별개로 저장됩니다. 10줄을 넘으면 스크롤되며 입력은 자동 저장됩니다."
+        )
+        hint.setObjectName("keyboardHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.text_edit = QPlainTextEdit()
+        self.text_edit.setObjectName("reviewMemoEdit")
+        self.text_edit.setPlaceholderText("관찰 내용, 이상 위치, 재확인 사항 등을 입력하세요.")
+        line_height = self.text_edit.fontMetrics().lineSpacing()
+        self.text_edit.setMinimumHeight(line_height * 10 + 24)
+        self.text_edit.setPlainText(note)
+        layout.addWidget(self.text_edit, stretch=1)
+
+        buttons = QHBoxLayout()
+        self.save_status = QLabel("자동 저장")
+        self.save_status.setObjectName("keyboardHint")
+        buttons.addWidget(self.save_status)
+        buttons.addStretch(1)
+        delete_button = QPushButton("메모 삭제")
+        delete_button.setObjectName("memoDeleteButton")
+        delete_button.clicked.connect(self._delete_note)
+        close_button = QPushButton("닫기")
+        close_button.clicked.connect(self.close)
+        buttons.addWidget(delete_button)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(350)
+        self._save_timer.timeout.connect(self.flush)
+        self.text_edit.textChanged.connect(self._schedule_save)
+
+    def _schedule_save(self) -> None:
+        self.save_status.setText("저장 중…")
+        self._save_timer.start()
+
+    def _delete_note(self) -> None:
+        self.text_edit.clear()
+        self.flush()
+
+    def flush(self) -> None:
+        self._save_timer.stop()
+        note = self.text_edit.toPlainText()
+        if note != self._last_saved:
+            self._save_callback(note)
+            self._last_saved = note
+        self.save_status.setText("자동 저장됨")
+
+    def closeEvent(self, event) -> None:
+        self.flush()
+        super().closeEvent(event)
+
+
 def start_excel_jump(
     parent,
     item: InspectionItem,
@@ -277,7 +410,8 @@ USAGE_HELP_TEXT = """OSC 파형 수동 비교기 사용 방법
   3) 행·열이 각각 1칸 이내인 인접 셀
   4) 한쪽에만 있으면 다른 칸은 '이미지 없음'으로 표시
 해당 Excel에 시트 자체가 없으면 '시트 없음'으로 표시해 '이미지 없음'과 구분합니다.
-Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 누락·중복·역할 오배치가 있으면 Review를 시작하지 않습니다.
+같은 셀에 이미지가 여러 장 있으면 모두 보존해 'D693 (1/2)', 'D693 (2/2)'처럼 표시하고 해당 시트에 확인 경고를 남깁니다.
+Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 원본 이미지의 Queue 누락·중복 배치·역할 오배치가 있으면 Review를 시작하지 않습니다.
 
 
 5. 메인 화면에서 넘기기
@@ -328,7 +462,7 @@ Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 누락�
 
 9. 참고
 • 이 프로그램은 유사도 점수, PASS/FAIL, 리포트를 만들지 않습니다.
-• 정상 로딩 결과는 원본 이미지 누락 0, 중복 0을 내부 검증한 결과입니다.
+• 정상 로딩 결과는 원본 이미지의 Queue 누락 0, 중복 배치 0을 내부 검증한 결과입니다.
 • 선택한 Excel 경로와 창 위치는 다음에 열 때도 기억합니다.
 • 메뉴 [도움말] → [사용 방법]에서 이 안내를 다시 볼 수 있습니다.
 """
@@ -358,6 +492,49 @@ class UsageHelpDialog(QDialog):
         layout.addLayout(buttons)
 
 
+class LoadSummaryDialog(QDialog):
+    """불러오기 결과를 제한된 크기의 스크롤 영역에 표시한다."""
+
+    def __init__(self, message: str, *, has_warnings: bool, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(
+            "불러오기 완료 · 확인 필요"
+            if has_warnings
+            else "시트 구성 및 무결성 안내"
+        )
+        self.resize(720, 480)
+        self.setMinimumSize(520, 340)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        header = QLabel(
+            "이미지 불러오기는 완료되었습니다. 아래 확인 항목을 검토해 주세요."
+            if has_warnings
+            else "이미지 불러오기 및 무결성 검사가 완료되었습니다."
+        )
+        header.setObjectName("positionLabel")
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        self.text.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self.text.setPlainText(message)
+        self.text.setObjectName("loadSummaryText")
+        layout.addWidget(self.text, stretch=1)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        close_button = QPushButton("확인")
+        close_button.setObjectName("inputActionBtn")
+        close_button.setDefault(True)
+        close_button.clicked.connect(self.accept)
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+
 class ImageListWindow(QDialog):
     """Excel 위치 목록과 해당 Double/Triple 이미지를 동시에 표시한다."""
 
@@ -374,6 +551,7 @@ class ImageListWindow(QDialog):
         workbook_paths: Dict[str, str],
         *,
         initial_index: int = 0,
+        annotation_store: Optional[ReviewAnnotationStore] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -386,6 +564,12 @@ class ImageListWindow(QDialog):
         }
         self._mode = mode
         self._workbook_paths = dict(workbook_paths)
+        self.annotation_store = annotation_store or ReviewAnnotationStore(
+            self._workbook_paths,
+            mode,
+            parent=self,
+        )
+        self._memo_dialog: Optional[ReviewMemoDialog] = None
         self._current_index = -1
         self._closing = False
         self._quadra_list_sizes_applied = False
@@ -445,6 +629,32 @@ class ImageListWindow(QDialog):
         header.addWidget(close_button)
         root.addLayout(header)
 
+        review_bar = QHBoxLayout()
+        review_bar.addWidget(QLabel("검토 표시"))
+        self.review_count_label = QLabel("기록 0건 · 불량 0건 · 메모만 0건")
+        self.review_count_label.setObjectName("reviewCountLabel")
+        review_bar.addWidget(self.review_count_label)
+        review_bar.addSpacing(12)
+        review_bar.addWidget(QLabel("목록 필터"))
+        self.record_filter_combo = QComboBox()
+        self.record_filter_combo.addItem("전체", "all")
+        self.record_filter_combo.addItem("기록 있는 항목", "recorded")
+        self.record_filter_combo.addItem("불량 항목", "defect")
+        self.record_filter_combo.addItem("메모 있는 항목", "memo")
+        self.record_filter_combo.setToolTip(
+            "현재 시트 필터와 함께 적용됩니다. 한 이미지라도 조건에 맞으면 표시합니다."
+        )
+        review_bar.addWidget(self.record_filter_combo)
+        review_bar.addStretch(1)
+        self.export_button = QPushButton("검토 결과 Excel 추출")
+        self.export_button.setObjectName("reviewExportButton")
+        self.export_button.setToolTip(
+            "불량 체크 또는 메모가 있는 이미지만 새 Excel 파일로 추출합니다."
+        )
+        self.export_button.clicked.connect(self._export_review_results)
+        review_bar.addWidget(self.export_button)
+        root.addLayout(review_bar)
+
         self.location_label = QLabel("목록에서 이미지를 선택해 주세요.")
         self.location_label.setObjectName("locationLabel")
         root.addWidget(self.location_label)
@@ -482,6 +692,8 @@ class ImageListWindow(QDialog):
             self.ref_title,
             self.ref_meta,
             self.ref_image,
+            self.ref_defect_check,
+            self.ref_memo_button,
             self.ref_jump_button,
         ) = self._create_preview_pane("Excel Ref")
         (
@@ -489,6 +701,8 @@ class ImageListWindow(QDialog):
             self.a_title,
             self.a_meta,
             self.a_image,
+            self.a_defect_check,
+            self.a_memo_button,
             self.a_jump_button,
         ) = self._create_preview_pane("Excel 비교A")
         (
@@ -496,6 +710,8 @@ class ImageListWindow(QDialog):
             self.b_title,
             self.b_meta,
             self.b_image,
+            self.b_defect_check,
+            self.b_memo_button,
             self.b_jump_button,
         ) = self._create_preview_pane("Excel 비교B")
         (
@@ -503,6 +719,8 @@ class ImageListWindow(QDialog):
             self.c_title,
             self.c_meta,
             self.c_image,
+            self.c_defect_check,
+            self.c_memo_button,
             self.c_jump_button,
         ) = self._create_preview_pane("Excel 비교C")
         self.ref_image.clicked.connect(lambda: self._enlarge("ref"))
@@ -513,6 +731,22 @@ class ImageListWindow(QDialog):
         self.a_jump_button.clicked.connect(lambda: self._jump_from_preview("a"))
         self.b_jump_button.clicked.connect(lambda: self._jump_from_preview("b"))
         self.c_jump_button.clicked.connect(lambda: self._jump_from_preview("c"))
+        for side, checkbox, memo_button in (
+            ("ref", self.ref_defect_check, self.ref_memo_button),
+            ("a", self.a_defect_check, self.a_memo_button),
+            ("b", self.b_defect_check, self.b_memo_button),
+            ("c", self.c_defect_check, self.c_memo_button),
+        ):
+            checkbox.toggled.connect(
+                lambda checked, owned_side=side: self._toggle_defect(
+                    owned_side, checked
+                )
+            )
+            memo_button.clicked.connect(
+                lambda _checked=False, owned_side=side: self._open_memo_editor(
+                    owned_side
+                )
+            )
         self.b_container.setVisible(mode in {"triple", "quadra"})
         self.c_container.setVisible(mode == "quadra")
         if mode == "quadra":
@@ -566,13 +800,26 @@ class ImageListWindow(QDialog):
         self.sheet_combo.currentIndexChanged.connect(
             self._on_sheet_filter_changed
         )
+        self.record_filter_combo.currentIndexChanged.connect(
+            self._on_record_filter_changed
+        )
+        self.annotation_store.changed.connect(self._on_annotations_changed)
         self._populate_table()
+        self._update_review_count()
         self.set_current_index(initial_index)
 
     def _create_preview_pane(
         self, default_title: str
-    ) -> Tuple[QWidget, QLabel, QLabel, ClickableLabel, QPushButton]:
-        return create_preview_pane(default_title)
+    ) -> Tuple[
+        QWidget,
+        QLabel,
+        QLabel,
+        ClickableLabel,
+        QCheckBox,
+        QPushButton,
+        QPushButton,
+    ]:
+        return create_review_preview_pane(default_title)
 
     @staticmethod
     def _cell_text(extracted: Optional[ExtractedImage]) -> str:
@@ -580,17 +827,23 @@ class ImageListWindow(QDialog):
             return "이미지 없음"
         if extracted.is_null:
             return extracted.placeholder_text
-        return extracted.cell_address
+        warning = " ⚠" if extracted.anchor_count > 1 else ""
+        return f"{extracted.display_cell_address}{warning}"
 
     def _populate_sheet_combo(self) -> None:
         counts: Dict[int, int] = {}
         names: Dict[int, str] = {}
         statuses: Dict[int, str] = {}
+        warning_counts: Dict[int, int] = {}
         empty_sheets = set()
         for item in self._all_items:
             counts[item.sheet_index] = counts.get(item.sheet_index, 0) + 1
             names.setdefault(item.sheet_index, item.sheet_name)
             statuses.setdefault(item.sheet_index, item.sheet_status_text)
+            if item.sheet_info is not None:
+                warning_counts.setdefault(
+                    item.sheet_index, len(item.sheet_info.image_warnings)
+                )
             if item.is_empty_sheet:
                 empty_sheets.add(item.sheet_index)
         blocker = QSignalBlocker(self.sheet_combo)
@@ -600,9 +853,14 @@ class ImageListWindow(QDialog):
         )
         for sheet_index in sorted(counts):
             review_count = 0 if sheet_index in empty_sheets else counts[sheet_index]
+            warning = (
+                f" · ⚠ 동일 셀 {warning_counts[sheet_index]}곳"
+                if warning_counts.get(sheet_index)
+                else ""
+            )
             self.sheet_combo.addItem(
                 f"{sheet_index}. {names[sheet_index]} "
-                f"[{statuses[sheet_index]}] ({review_count}개)",
+                f"[{statuses[sheet_index]}] ({review_count}개){warning}",
                 sheet_index,
             )
         del blocker
@@ -610,21 +868,30 @@ class ImageListWindow(QDialog):
     def _on_sheet_filter_changed(self, combo_index: int) -> None:
         if self._closing or combo_index < 0:
             return
+        self._apply_filters()
+        self.focus_list()
+
+    def _on_record_filter_changed(self, combo_index: int) -> None:
+        if self._closing or combo_index < 0:
+            return
+        self._apply_filters()
+        self.focus_list()
+
+    def _apply_filters(self, preferred_item: Optional[InspectionItem] = None) -> None:
         current_item = (
             self._items[self._current_index]
             if 0 <= self._current_index < len(self._items)
             else None
         )
-        sheet_index = self.sheet_combo.itemData(combo_index)
-        self._items = (
-            list(self._all_items)
-            if sheet_index is None
-            else [
-                item
-                for item in self._all_items
-                if item.sheet_index == int(sheet_index)
-            ]
-        )
+        current_item = preferred_item or current_item
+        sheet_index = self.sheet_combo.currentData()
+        record_filter = self.record_filter_combo.currentData() or "all"
+        self._items = [
+            item
+            for item in self._all_items
+            if (sheet_index is None or item.sheet_index == int(sheet_index))
+            and self._item_matches_record_filter(item, str(record_filter))
+        ]
         self._current_index = -1
         self._populate_table()
         target = next(
@@ -636,7 +903,25 @@ class ImageListWindow(QDialog):
             0,
         )
         self._set_filtered_index(target)
-        self.focus_list()
+
+    def _item_matches_record_filter(
+        self, item: InspectionItem, record_filter: str
+    ) -> bool:
+        if record_filter == "all":
+            return True
+        annotations = [
+            annotation
+            for role, image in item.side_images()
+            if (annotation := self.annotation_store.annotation_for(role, image))
+            is not None
+        ]
+        if record_filter == "recorded":
+            return any(annotation.should_keep for annotation in annotations)
+        if record_filter == "defect":
+            return any(annotation.is_defect for annotation in annotations)
+        if record_filter == "memo":
+            return any(annotation.note.strip() for annotation in annotations)
+        return True
 
     def _populate_table(self) -> None:
         headers = ["전체", "시트", "No.", "Ref 셀", "비교A 셀"]
@@ -694,9 +979,9 @@ class ImageListWindow(QDialog):
             blocker = QSignalBlocker(self.sheet_combo)
             self.sheet_combo.setCurrentIndex(0)
             del blocker
-            self._items = list(self._all_items)
-            self._current_index = -1
-            self._populate_table()
+            with QSignalBlocker(self.record_filter_combo):
+                self.record_filter_combo.setCurrentIndex(0)
+            self._apply_filters(preferred_item=target_item)
         filtered_index = next(
             index
             for index, item in enumerate(self._items)
@@ -730,6 +1015,8 @@ class ImageListWindow(QDialog):
         if self._closing:
             return
         if 0 <= current_row < len(self._items):
+            if self._current_index != current_row:
+                self._close_memo_editor()
             self._current_index = current_row
             self._render_current()
 
@@ -778,6 +1065,177 @@ class ImageListWindow(QDialog):
             button.setEnabled(
                 enabled_mode and self._preview_jump_available(side)
             )
+
+    @staticmethod
+    def _refresh_dynamic_style(widget: QWidget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def _current_image(self, side: str) -> Optional[ExtractedImage]:
+        if not (0 <= self._current_index < len(self._items)):
+            return None
+        item = self._items[self._current_index]
+        return {
+            "ref": item.image_ref,
+            "a": item.image_a,
+            "b": item.image_b,
+            "c": item.image_c,
+        }.get(side)
+
+    def _sync_review_controls(self) -> None:
+        controls = {
+            "ref": (
+                self.ref_container,
+                self.ref_defect_check,
+                self.ref_memo_button,
+            ),
+            "a": (
+                self.a_container,
+                self.a_defect_check,
+                self.a_memo_button,
+            ),
+            "b": (
+                self.b_container,
+                self.b_defect_check,
+                self.b_memo_button,
+            ),
+            "c": (
+                self.c_container,
+                self.c_defect_check,
+                self.c_memo_button,
+            ),
+        }
+        for side, (container, checkbox, memo_button) in controls.items():
+            image = self._current_image(side)
+            annotation = self.annotation_store.annotation_for(side, image)
+            available = annotation is not None
+            checkbox.setEnabled(available)
+            memo_button.setEnabled(available)
+            with QSignalBlocker(checkbox):
+                checkbox.setChecked(
+                    bool(annotation is not None and annotation.is_defect)
+                )
+            has_note = bool(annotation is not None and annotation.note.strip())
+            memo_button.setText("메모 있음" if has_note else "메모")
+            memo_button.setProperty("hasNote", has_note)
+            container.setProperty(
+                "defectMarked",
+                bool(annotation is not None and annotation.is_defect),
+            )
+            self._refresh_dynamic_style(memo_button)
+            self._refresh_dynamic_style(container)
+
+    def _toggle_defect(self, side: str, checked: bool) -> None:
+        if self._closing:
+            return
+        image = self._current_image(side)
+        if image is None or image.is_null:
+            return
+        self.annotation_store.update(side, image, is_defect=checked)
+
+    def _open_memo_editor(self, side: str) -> None:
+        if self._closing:
+            return
+        image = self._current_image(side)
+        annotation = self.annotation_store.annotation_for(side, image)
+        if image is None or annotation is None:
+            return
+        self._close_memo_editor()
+        role = ROLE_DISPLAY_NAMES.get(side, side)
+        title = f"{role} · {image.location_text}"
+        dialog = ReviewMemoDialog(
+            title,
+            annotation.note,
+            lambda note, owned_side=side, owned_image=image: self.annotation_store.update(
+                owned_side, owned_image, note=note
+            ),
+            self,
+        )
+        self._memo_dialog = dialog
+        dialog.destroyed.connect(
+            lambda _object=None, owned=dialog: self._on_memo_dialog_destroyed(
+                owned
+            )
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.text_edit.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _on_memo_dialog_destroyed(self, dialog: ReviewMemoDialog) -> None:
+        if self._memo_dialog is dialog:
+            self._memo_dialog = None
+
+    def _close_memo_editor(self) -> None:
+        if self._memo_dialog is None:
+            return
+        dialog = self._memo_dialog
+        self._memo_dialog = None
+        try:
+            dialog.close()
+        except RuntimeError:
+            pass
+
+    def _update_review_count(self) -> None:
+        records = self.annotation_store.records()
+        self.review_count_label.setText(
+            f"기록 {len(records)}건 · 불량 {self.annotation_store.defect_count}건 · "
+            f"메모만 {self.annotation_store.memo_only_count}건"
+        )
+        self.export_button.setEnabled(bool(records))
+
+    def _on_annotations_changed(self) -> None:
+        if self._closing:
+            return
+        self._update_review_count()
+        self._sync_review_controls()
+        if (self.record_filter_combo.currentData() or "all") != "all":
+            current_item = (
+                self._items[self._current_index]
+                if 0 <= self._current_index < len(self._items)
+                else None
+            )
+            self._apply_filters(preferred_item=current_item)
+
+    def _export_review_results(self) -> None:
+        records = self.annotation_store.records()
+        if not records:
+            QMessageBox.information(
+                self,
+                "검토 결과 추출",
+                "불량 체크 또는 메모가 있는 기록이 없습니다.",
+            )
+            return
+        first_path = next(
+            (path for path in self._workbook_paths.values() if path), ""
+        )
+        base_dir = os.path.dirname(first_path) if first_path else os.getcwd()
+        filename = f"이미지_검토기록_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+        output_path, _selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "검토 결과 Excel 저장",
+            os.path.join(base_dir, filename),
+            "Excel 통합 문서 (*.xlsx)",
+        )
+        if not output_path:
+            return
+        if not output_path.lower().endswith(".xlsx"):
+            output_path += ".xlsx"
+        try:
+            count = export_annotations_xlsx(output_path, records)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "검토 결과 추출 실패",
+                f"Excel 파일을 저장하지 못했습니다.\n{exc}",
+            )
+            return
+        QMessageBox.information(
+            self,
+            "검토 결과 추출 완료",
+            f"불량 또는 메모 기록 {count}건을 저장했습니다.\n{output_path}",
+        )
 
     def _preview_jump_available(self, side: str) -> bool:
         if not (0 <= self._current_index < len(self._items)):
@@ -838,21 +1296,36 @@ class ImageListWindow(QDialog):
                 self.c_title, self.c_meta, self.c_image, "Excel 비교C"
             )
             self._sync_preview_jump_buttons()
+            self._sync_review_controls()
             return
 
         item = self._items[self._current_index]
         global_index = self._global_index_by_id[id(item)]
-        if self.sheet_combo.currentData() is None:
+        if (
+            self.sheet_combo.currentData() is None
+            and (self.record_filter_combo.currentData() or "all") == "all"
+        ):
             position_text = f"전체 {global_index + 1} / {len(self._all_items)}"
-        else:
+        elif (self.record_filter_combo.currentData() or "all") == "all":
             position_text = (
                 f"시트 {self._current_index + 1} / {len(self._items)}"
                 f" · 전체 {global_index + 1} / {len(self._all_items)}"
             )
+        else:
+            position_text = (
+                f"목록 {self._current_index + 1} / {len(self._items)}"
+                f" · 전체 {global_index + 1} / {len(self._all_items)}"
+            )
         self.position_label.setText(position_text)
+        duplicate_warning = (
+            f" · {item.duplicate_warning_text}"
+            if item.duplicate_warning_text
+            else ""
+        )
         self.location_label.setText(
             f"시트 {item.sheet_index}. {item.sheet_name} [{item.sheet_status_text}] · "
             f"시트 내 {item.index} · 기준 위치 {item.cell_address}"
+            f"{duplicate_warning}"
         )
         self._set_preview_pane(
             self.ref_title,
@@ -900,6 +1373,7 @@ class ImageListWindow(QDialog):
                 )
         self._equalize_preview_panes()
         self._sync_preview_jump_buttons()
+        self._sync_review_controls()
 
     def _list_table_default_height(self) -> int:
         visible_rows = 3 if self._mode == "quadra" else 7
@@ -1013,6 +1487,7 @@ class ImageListWindow(QDialog):
         if self._closing:
             return
         self._closing = True
+        self._close_memo_editor()
         self.table.setEnabled(False)
         try:
             self.table.currentCellChanged.disconnect(

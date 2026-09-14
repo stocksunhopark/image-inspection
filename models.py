@@ -31,6 +31,7 @@ class SheetInfo:
     role_sheet_names: Dict[str, Optional[str]] = field(default_factory=dict)
     role_sheet_ids: Dict[str, Optional[str]] = field(default_factory=dict)
     matching_warning: str = ""
+    image_warnings: Tuple[str, ...] = ()
 
     @property
     def present_roles(self) -> Tuple[str, ...]:
@@ -49,7 +50,12 @@ class SheetInfo:
 
     @property
     def display_text(self) -> str:
-        return f"{self.display_name} [{self.status_text}]"
+        warning = (
+            f" · ⚠ 동일 셀 {len(self.image_warnings)}곳"
+            if self.image_warnings
+            else ""
+        )
+        return f"{self.display_name} [{self.status_text}]{warning}"
 
 
 @dataclass(frozen=True)
@@ -97,6 +103,8 @@ class ExtractedImage:
     source_sheet_id: Optional[str] = None
     source_image_id: Optional[str] = None
     missing_reason: Optional[str] = None
+    anchor_occurrence: int = 1
+    anchor_count: int = 1
 
     @property
     def placeholder_text(self) -> str:
@@ -109,7 +117,17 @@ class ExtractedImage:
         if self.is_null:
             return f"{self.sheet_name} · {self.placeholder_text}"
         merged = f" · 병합 {self.merged_range}" if self.merged_range else ""
-        return f"{self.sheet_name} · {self.cell_address}{merged}"
+        duplicate = " · ⚠ 동일 셀 중복" if self.anchor_count > 1 else ""
+        return f"{self.sheet_name} · {self.display_cell_address}{merged}{duplicate}"
+
+    @property
+    def display_cell_address(self) -> str:
+        if self.is_null or self.anchor_count <= 1:
+            return self.cell_address
+        return (
+            f"{self.cell_address} "
+            f"({self.anchor_occurrence}/{self.anchor_count})"
+        )
 
 
 @dataclass
@@ -170,8 +188,18 @@ class InspectionItem:
             return "-"
         for image in self._side_extracted():
             if image is not None and not image.is_null:
-                return image.cell_address
+                return image.display_cell_address
         return "-"
+
+    @property
+    def duplicate_warning_text(self) -> str:
+        details = [
+            f"{ROLE_LABELS.get(role, role.upper())} "
+            f"{image.anchor_occurrence}/{image.anchor_count}"
+            for role, image in self.side_images()
+            if not image.is_null and image.anchor_count > 1
+        ]
+        return f"⚠ 동일 셀 중복: {', '.join(details)}" if details else ""
 
     def side_images(self) -> List[Tuple[str, ExtractedImage]]:
         images: List[Tuple[str, ExtractedImage]] = [

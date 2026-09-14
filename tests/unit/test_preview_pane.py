@@ -12,11 +12,11 @@ def _meta_row(container):
 def _assert_jump_button_at_right_edge(container, metadata, button, qapp) -> None:
     qapp.processEvents()
     meta_row = _meta_row(container)
-    assert meta_row.count() == 2
+    assert meta_row.count() >= 2
     assert meta_row.itemAt(0).widget() is metadata
-    assert meta_row.itemAt(1).widget() is button
+    assert meta_row.itemAt(meta_row.count() - 1).widget() is button
     assert meta_row.stretch(0) == 1
-    assert meta_row.stretch(1) == 0
+    assert meta_row.stretch(meta_row.count() - 1) == 0
     assert int(metadata.alignment()) & int(Qt.AlignmentFlag.AlignHCenter)
 
     margins = container.layout().contentsMargins()

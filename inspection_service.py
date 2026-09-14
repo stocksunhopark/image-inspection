@@ -10,11 +10,15 @@ import tempfile
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 from excel_manager import (
-    Position,
+    ImageKey,
+    duplicate_anchor_counts,
     extract_image_meta,
     extract_image_objects_by_position,
+    image_anchor_position,
+    image_occurrence,
     make_null_image,
     pair_image_positions,
     persist_source_from_obj,
@@ -41,10 +45,10 @@ ProgressCallback = Callable[[int, int, str], None]
 StatusCallback = Callable[[str], None]
 CancelCallback = Callable[[], bool]
 AlignedPositions = Tuple[
-    Optional[Position],
-    Optional[Position],
-    Optional[Position],
-    Optional[Position],
+    Optional[ImageKey],
+    Optional[ImageKey],
+    Optional[ImageKey],
+    Optional[ImageKey],
 ]
 
 
@@ -68,19 +72,19 @@ class _SheetGroup:
 class _SourceImageRecord:
     role: str
     source_sheet_id: str
-    position: Position
+    position: ImageKey
 
 
 def _attach_extra_side(
-    groups: List[List[Optional[Position]]],
+    groups: List[List[Optional[ImageKey]]],
     extra_index: int,
-    objects_ref: Dict[Position, object],
-    objects_extra: Dict[Position, object],
-    objects_a: Dict[Position, object],
+    objects_ref: Dict[ImageKey, object],
+    objects_extra: Dict[ImageKey, object],
+    objects_a: Dict[ImageKey, object],
     worksheet_ref=None,
     worksheet_extra=None,
     worksheet_a=None,
-    objects_fallback: Optional[Dict[Position, object]] = None,
+    objects_fallback: Optional[Dict[ImageKey, object]] = None,
     fallback_index: Optional[int] = None,
     worksheet_fallback=None,
     cancel_cb: Optional[CancelCallback] = None,
@@ -89,7 +93,7 @@ def _attach_extra_side(
     group_by_ref = {
         group[0]: group for group in groups if group[0] is not None
     }
-    leftover: Dict[Position, object] = {}
+    leftover: Dict[ImageKey, object] = {}
     for position_ref, position_extra in pair_image_positions(
         objects_ref,
         objects_extra,
@@ -112,7 +116,7 @@ def _attach_extra_side(
         for group in groups
         if group[0] is None and group[1] is not None
     }
-    still_left: Dict[Position, object] = {}
+    still_left: Dict[ImageKey, object] = {}
     for position_a, position_extra in pair_image_positions(
         a_only,
         leftover,
@@ -144,7 +148,7 @@ def _attach_extra_side(
             and group[extra_index] is None
             and all(group[index] is None for index in range(fallback_index))
         }
-        remaining: Dict[Position, object] = {}
+        remaining: Dict[ImageKey, object] = {}
         for position_fallback, position_extra in pair_image_positions(
             fallback_objects,
             still_left,
@@ -159,16 +163,16 @@ def _attach_extra_side(
         still_left = remaining
 
     for position_extra in sorted(still_left):
-        group: List[Optional[Position]] = [None, None, None, None]
+        group: List[Optional[ImageKey]] = [None, None, None, None]
         group[extra_index] = position_extra
         groups.append(group)
 
 
 def _align_positions(
-    objects_ref: Dict[Position, object],
-    objects_a: Dict[Position, object],
-    objects_b: Optional[Dict[Position, object]],
-    objects_c: Optional[Dict[Position, object]] = None,
+    objects_ref: Dict[ImageKey, object],
+    objects_a: Dict[ImageKey, object],
+    objects_b: Optional[Dict[ImageKey, object]],
+    objects_c: Optional[Dict[ImageKey, object]] = None,
     worksheet_ref=None,
     worksheet_a=None,
     worksheet_b=None,
@@ -183,7 +187,7 @@ def _align_positions(
         worksheet_a,
         cancel_cb=cancel_cb,
     )
-    groups: List[List[Optional[Position]]] = [
+    groups: List[List[Optional[ImageKey]]] = [
         [position_ref, position_a, None, None]
         for position_ref, position_a in ref_a_pairs
     ]
@@ -333,14 +337,15 @@ def _make_sheet_info(
 
 def _make_source_image_ids(
     source: Optional[_SourceSheet],
-    objects: Dict[Position, object],
-) -> Dict[Position, str]:
+    objects: Dict[ImageKey, object],
+) -> Dict[ImageKey, str]:
     if source is None:
         return {}
     return {
         position: (
             f"{source.source_sheet_id}|image:{number}"
             f"|r:{position[0] + 1}|c:{position[1] + 1}"
+            f"|occ:{image_occurrence(position)}"
         )
         for number, position in enumerate(sorted(objects), start=1)
     }
@@ -357,7 +362,7 @@ def _difference_text(counter: Counter[str], limit: int = 8) -> str:
 def _validate_aligned_sheet(
     info: SheetInfo,
     groups: Sequence[AlignedPositions],
-    source_image_ids: Sequence[Dict[Position, str]],
+    source_image_ids: Sequence[Dict[ImageKey, str]],
     roles: Tuple[str, ...],
 ) -> None:
     """원본 bytes를 읽기 전에 위치 정렬의 누락·중복을 먼저 차단한다."""
@@ -528,7 +533,11 @@ def _validate_review_queue(
                     errors.append(
                         f"{source_image_id}: 잘못된 통합 Sheet에 배치되었습니다."
                     )
-                if source_record.position != (image.anchor_row, image.anchor_col):
+                if source_record.position != (
+                    image.anchor_row,
+                    image.anchor_col,
+                    image.anchor_occurrence,
+                ):
                     errors.append(
                         f"{source_image_id}: 원본과 다른 셀 위치에 배치되었습니다."
                     )
@@ -608,9 +617,10 @@ def load_inspection_images(
 
         if status_cb is not None:
             status_cb("시트 이름 기준으로 전체 Review 목록 구성 중...")
-        sheet_groups, source_sheets, warnings = _build_sheet_groups(
+        sheet_groups, source_sheets, mapping_warnings = _build_sheet_groups(
             workbooks, roles, sheet_mapping
         )
+        warnings = list(mapping_warnings)
 
         sheet_contexts = []
         sheet_infos: Dict[int, SheetInfo] = {}
@@ -635,6 +645,22 @@ def load_inspection_images(
                 extract_image_objects_by_position(worksheet)
                 for worksheet in worksheets
             ]
+            duplicate_counts = [
+                duplicate_anchor_counts(objects)
+                for objects in object_maps
+            ]
+            image_warnings: List[str] = []
+            for role, source, counts in zip(roles, sources, duplicate_counts):
+                if source is None:
+                    continue
+                for (row, col), count in sorted(counts.items()):
+                    cell = f"{get_column_letter(col + 1)}{row + 1}"
+                    image_warnings.append(
+                        f"{info.display_name} · {ROLE_LABELS[role]} "
+                        f"({source.name}!{cell}): 동일 셀에 이미지 {count}장"
+                    )
+            info.image_warnings = tuple(image_warnings)
+            warnings.extend(image_warnings)
             source_image_ids = [
                 _make_source_image_ids(source, objects)
                 for source, objects in zip(sources, object_maps)
@@ -672,6 +698,7 @@ def load_inspection_images(
                     sources,
                     worksheets,
                     object_maps,
+                    duplicate_counts,
                     source_image_ids,
                     groups,
                 )
@@ -686,6 +713,7 @@ def load_inspection_images(
             sources,
             worksheets,
             object_maps,
+            duplicate_counts,
             source_image_ids,
             groups,
         ) in sheet_contexts:
@@ -715,6 +743,7 @@ def load_inspection_images(
                     )
                     if source is not None and image_obj is not None:
                         source_image_id = source_image_ids[side_index][position]
+                        anchor_position = image_anchor_position(position)
                         extracted = extract_image_meta(
                             worksheet,
                             sheet_index,
@@ -722,6 +751,10 @@ def load_inspection_images(
                             source_role=role,
                             source_sheet_id=source.source_sheet_id,
                             source_image_id=source_image_id,
+                            anchor_occurrence=image_occurrence(position),
+                            anchor_count=duplicate_counts[side_index].get(
+                                anchor_position, 1
+                            ),
                         )
                         persist_source_from_obj(
                             extracted, image_obj, preview_dir, role
@@ -798,7 +831,7 @@ def load_inspection_images(
             preview_dir=preview_dir,
             sheet_infos=sheet_infos,
             integrity_report=report,
-            warnings=warnings,
+            warnings=tuple(warnings),
         )
     finally:
         for workbook in workbooks:

@@ -38,6 +38,7 @@ from sheet_mapping import (
 from ui.dialogs import (
     ImageListWindow,
     ImageViewerDialog,
+    LoadSummaryDialog,
     UsageHelpDialog,
     create_preview_pane,
     start_excel_jump,
@@ -567,9 +568,15 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(100)
         total = len(self.state.flat_items)
         report = result.integrity_report
+        warning_text = (
+            f" · 주의 {len(result.warnings)}건"
+            if result.warnings
+            else ""
+        )
         self._set_status(
             f"완료: {report.review_sheet_count}개 시트 · {total}개 Review 화면 · "
-            f"원본 이미지 {report.source_image_count}개 · 무결성 정상",
+            f"원본 이미지 {report.source_image_count}개 · 무결성 정상"
+            f"{warning_text}",
             busy=False,
         )
         self._render_current()
@@ -612,16 +619,19 @@ class MainWindow(QMainWindow):
                 "",
                 f"전체 원본 이미지 : {report.source_image_count}개",
                 f"Queue 배치 이미지 : {report.queue_image_count}개",
-                "누락 : 0 / 중복 : 0",
+                "Queue 누락 : 0 / Queue 중복 배치 : 0",
             ]
         )
-        if self.state.load_warnings:
-            message += "\n\n이름 확인 안내\n" + "\n".join(
+        has_warnings = bool(self.state.load_warnings)
+        if has_warnings:
+            message += "\n\n확인 필요 안내\n" + "\n".join(
                 f"- {warning}" for warning in self.state.load_warnings
             )
-            QMessageBox.warning(self, "시트 구성 및 무결성 안내", message)
-        else:
-            QMessageBox.information(self, "시트 구성 및 무결성 안내", message)
+        LoadSummaryDialog(
+            message,
+            has_warnings=has_warnings,
+            parent=self,
+        ).exec()
 
     def _on_load_failed(self, message: str) -> None:
         previous = self._previous_result_text()
@@ -690,8 +700,14 @@ class MainWindow(QMainWindow):
                 sheet_name = info.display_name if info is not None else rows[0].sheet_name
                 status = info.status_text if info is not None else rows[0].sheet_status_text
                 review_count = 0 if all(row.is_empty_sheet for row in rows) else len(rows)
+                warning = (
+                    f" · ⚠ 동일 셀 {len(info.image_warnings)}곳"
+                    if info is not None and info.image_warnings
+                    else ""
+                )
                 self.sheet_combo.addItem(
-                    f"{sheet_index}. {sheet_name} [{status}] ({review_count}개)",
+                    f"{sheet_index}. {sheet_name} [{status}] "
+                    f"({review_count}개){warning}",
                     sheet_index,
                 )
 
@@ -754,9 +770,15 @@ class MainWindow(QMainWindow):
         self.current_mode_label.setText(f"현재 결과: {mode_label(self.state.mode)}")
         sheet_position, sheet_total = self.state.current_sheet_position()
         self.position_label.setText(f"전체 {current + 1} / {total}")
+        duplicate_warning = (
+            f" · {item.duplicate_warning_text}"
+            if item.duplicate_warning_text
+            else ""
+        )
         self.location_label.setText(
             f"시트 {item.sheet_index}. {item.sheet_name} [{item.sheet_status_text}] · "
             f"시트 내 {sheet_position}/{sheet_total} · 기준 위치 {item.cell_address}"
+            f"{duplicate_warning}"
         )
         with QSignalBlocker(self.position_slider):
             self.position_slider.setRange(0, max(0, total - 1))

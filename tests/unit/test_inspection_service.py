@@ -837,7 +837,7 @@ def test_integrity_check_rejects_duplicate_queue_source_image(
         load_inspection_images(str(ref), str(compare))
 
 
-def test_duplicate_image_anchor_is_rejected_instead_of_dropping_an_image(
+def test_duplicate_image_anchor_is_preserved_with_warning(
     tmp_path: Path,
 ):
     source_a = tmp_path / "duplicate-a.png"
@@ -858,5 +858,27 @@ def test_duplicate_image_anchor_is_rejected_instead_of_dropping_an_image(
         {"MAIN": {"images": {"A1": (10, 20, 30)}}},
     )
 
-    with pytest.raises(ValueError, match="이미지가 2개 이상"):
-        load_inspection_images(str(ref), str(compare))
+    result = load_inspection_images(str(ref), str(compare))
+    try:
+        rows = result.items_by_sheet[1]
+        assert len(rows) == 2
+        assert [item.cell_address for item in rows] == [
+            "A1 (1/2)",
+            "A1 (2/2)",
+        ]
+        assert rows[0].image_ref.anchor_occurrence == 1
+        assert rows[0].image_ref.anchor_count == 2
+        assert rows[0].image_a.is_null is False
+        assert rows[1].image_ref.anchor_occurrence == 2
+        assert rows[1].image_ref.anchor_count == 2
+        assert rows[1].image_a.is_null is True
+        assert rows[0].image_ref.source_path != rows[1].image_ref.source_path
+        _assert_real_lazy_image(rows[0].image_ref, result.preview_dir, (255, 0, 0))
+        _assert_real_lazy_image(rows[1].image_ref, result.preview_dir, (0, 255, 0))
+        assert len(result.sheet_infos[1].image_warnings) == 1
+        assert "MAIN!A1" in result.sheet_infos[1].image_warnings[0]
+        assert "이미지 2장" in result.warnings[0]
+        assert result.integrity_report.source_image_count == 3
+        assert result.integrity_report.queue_image_count == 3
+    finally:
+        shutil.rmtree(result.preview_dir, ignore_errors=True)

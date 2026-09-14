@@ -20,6 +20,7 @@ from models import (
     InspectionItem,
     SheetInfo,
 )
+from review_annotations import ReviewAnnotationStore
 from ui.dialogs import ImageListWindow
 
 
@@ -144,6 +145,22 @@ def _source_rgb(label) -> tuple[int, int, int]:
 def _close_window(window: ImageListWindow, qapp: QApplication) -> None:
     window.close()
     qapp.processEvents()
+
+
+def test_duplicate_cell_text_shows_occurrence_and_warning():
+    extracted = ExtractedImage(
+        sheet_index=1,
+        sheet_name="MAIN",
+        cell_address="D693",
+        merged_range="D693:J712",
+        anchor_row=692,
+        anchor_col=3,
+        anchor_occurrence=2,
+        anchor_count=3,
+    )
+
+    assert ImageListWindow._cell_text(extracted) == "D693 (2/3) ⚠"
+    assert "동일 셀 중복" in extracted.location_text
 
 
 def test_double_table_initial_index_and_keyboard_update_preview_immediately(
@@ -890,5 +907,64 @@ def test_list_preview_header_keeps_jump_button_at_right(qapp, sample_items):
             window.ref_jump_button,
             qapp,
         )
+    finally:
+        _close_window(window, qapp)
+
+
+@pytest.mark.parametrize(
+    ("mode", "visible_sides"),
+    [
+        ("double", ("ref", "a")),
+        ("triple", ("ref", "a", "b")),
+        ("quadra", ("ref", "a", "b", "c")),
+    ],
+)
+def test_defect_and_memo_controls_apply_to_every_mode(
+    qapp,
+    tmp_path: Path,
+    sample_items,
+    mode,
+    visible_sides,
+):
+    store = ReviewAnnotationStore(
+        sample_items["paths"],
+        mode,
+        storage_path=tmp_path / f"{mode}-annotations.json",
+    )
+    window = ImageListWindow(
+        sample_items[mode],
+        mode,
+        sample_items["paths"],
+        annotation_store=store,
+    )
+    try:
+        window.show()
+        qapp.processEvents()
+        for side in visible_sides:
+            assert getattr(window, f"{side}_defect_check").isEnabled()
+            assert getattr(window, f"{side}_memo_button").isEnabled()
+
+        window._open_memo_editor("ref")
+        assert window._memo_dialog is not None
+        editor = window._memo_dialog.text_edit
+        assert editor.minimumHeight() >= editor.fontMetrics().lineSpacing() * 10
+        editor.setPlainText("재확인 메모")
+        window._memo_dialog.flush()
+        qapp.processEvents()
+
+        assert window.ref_defect_check.isChecked() is False
+        assert window.ref_memo_button.text() == "메모 있음"
+        assert "기록 1건" in window.review_count_label.text()
+        assert "메모만 1건" in window.review_count_label.text()
+
+        window.ref_defect_check.setChecked(True)
+        qapp.processEvents()
+        assert store.records()[0].is_defect is True
+        assert store.records()[0].note == "재확인 메모"
+        assert "불량 1건" in window.review_count_label.text()
+
+        window.record_filter_combo.setCurrentIndex(1)
+        qapp.processEvents()
+        assert window.table.rowCount() == 1
     finally:
         _close_window(window, qapp)

@@ -7,6 +7,7 @@ from PyQt6.QtCore import QSettings
 
 import ui.main_window as main_window_module
 from models import MISSING_SHEET, ExtractedImage, InspectionItem, SheetInfo
+from ui.dialogs import LoadSummaryDialog
 
 
 def _extracted(
@@ -44,6 +45,22 @@ def _window(tmp_path, monkeypatch):
         ),
     )
     return main_window_module.MainWindow()
+
+
+def test_load_summary_dialog_uses_fixed_scrollable_text_area(qapp):
+    message = "\n".join(f"확인 위치 {index}" for index in range(200))
+    dialog = LoadSummaryDialog(message, has_warnings=True)
+    try:
+        dialog.show()
+        qapp.processEvents()
+
+        assert dialog.windowTitle() == "불러오기 완료 · 확인 필요"
+        assert dialog.height() <= 480
+        assert dialog.text.isReadOnly()
+        assert dialog.text.verticalScrollBar().maximum() > 0
+    finally:
+        dialog.close()
+        dialog.deleteLater()
 
 
 def test_double_navigation_shows_two_images_without_comparison_controls(
