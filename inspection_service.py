@@ -9,11 +9,12 @@ import shutil
 import tempfile
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
+from excel_com_adapter import discover_public_label_template
 from excel_manager import (
     ImageKey,
+    InspectionWorkbookLoader,
     duplicate_anchor_counts,
     extract_image_meta,
     extract_image_objects_by_position,
@@ -601,6 +602,9 @@ def load_inspection_images(
 
     preview_dir = tempfile.mkdtemp(prefix="excel_image_inspector_")
     workbooks = []
+    workbook_loader = InspectionWorkbookLoader(
+        discover_public_label_template(paths)
+    )
     keep_preview_dir = False
 
     def raise_if_cancelled() -> None:
@@ -612,7 +616,7 @@ def load_inspection_images(
             raise_if_cancelled()
             if status_cb is not None:
                 status_cb(f"Excel 파일 여는 중... ({index}/{len(paths)})")
-            workbooks.append(load_workbook(path, data_only=True))
+            workbooks.append(workbook_loader.open(path, status_cb=status_cb))
         raise_if_cancelled()
 
         if status_cb is not None:
@@ -840,5 +844,6 @@ def load_inspection_images(
             except Exception:
                 # 다른 workbook과 부분 추출 폴더 정리를 계속 수행한다.
                 pass
+        workbook_loader.close()
         if not keep_preview_dir:
             shutil.rmtree(preview_dir, ignore_errors=True)

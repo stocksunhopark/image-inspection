@@ -1,15 +1,22 @@
-"""openpyxl 기반 Excel 이미지 위치 추출과 지연 미리보기 로딩."""
+"""Excel 이미지 위치 추출과 지연 미리보기 로딩."""
 
 import os
 import zipfile
 from collections import Counter
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 from xml.etree.ElementTree import ParseError, fromstring
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from PIL import Image
 
+from excel_com_adapter import (
+    DEFAULT_PUBLIC_LABEL,
+    ExcelComSession,
+    PublicLabelTemplate,
+    convert_rms_workbook_to_public,
+    is_rms_protected_workbook,
+)
 from models import ExtractedImage
 
 Position = Tuple[int, int]
@@ -72,7 +79,9 @@ def _sheet_names_from_workbook_xml(path: str) -> Optional[List[str]]:
 
 
 def read_sheet_index_names(path: str) -> List[Tuple[int, str]]:
-    """이미지나 스타일을 열지 않고 ``(1-based 인덱스, 시트명)``을 반환한다."""
+    """Public 변환을 보장한 뒤 ``(1-based 인덱스, 시트명)``을 반환한다."""
+    if is_rms_protected_workbook(path):
+        convert_rms_workbook_to_public(path)
     titles = _sheet_names_from_workbook_xml(path)
     if titles is None:
         workbook = load_workbook(path, read_only=True)
@@ -81,6 +90,44 @@ def read_sheet_index_names(path: str) -> List[Tuple[int, str]]:
         finally:
             workbook.close()
     return list(enumerate(titles, start=1))
+
+
+class InspectionWorkbookLoader:
+    """Convert RMS inputs to Public, then load every workbook with openpyxl."""
+
+    def __init__(
+        self, public_label: PublicLabelTemplate = DEFAULT_PUBLIC_LABEL
+    ):
+        self._com_session: Optional[ExcelComSession] = None
+        self._public_label = public_label
+
+    def open(
+        self,
+        path: str,
+        *,
+        status_cb: Optional[Callable[[str], None]] = None,
+    ):
+        if is_rms_protected_workbook(path):
+            if status_cb is not None:
+                status_cb(
+                    "Internal 보안 문서를 Public으로 변환하고 있습니다. "
+                    "최초 변환에는 시간이 걸릴 수 있습니다."
+                )
+            if self._com_session is None:
+                self._com_session = ExcelComSession()
+            convert_rms_workbook_to_public(
+                path,
+                self._public_label,
+                session=self._com_session,
+            )
+            if status_cb is not None:
+                status_cb("Public 변환 완료. Excel 파일을 불러오는 중...")
+        return load_workbook(path, data_only=True)
+
+    def close(self) -> None:
+        if self._com_session is not None:
+            self._com_session.close()
+            self._com_session = None
 
 
 def find_merged_range(worksheet, row_1based: int, col_1based: int) -> str:
@@ -315,15 +362,24 @@ def persist_source_from_obj(
     preview_dir: str,
     side: str,
 ) -> bytes:
-    raw = image_obj._data()
-    extension = guess_image_extension(raw)
+    export_png = getattr(image_obj, "export_png", None)
+    raw = b""
+    extension = ".png" if callable(export_png) else None
+    if extension is None:
+        raw = image_obj._data()
+        extension = guess_image_extension(raw)
     filename = (
         f"s{extracted.sheet_index}_r{extracted.anchor_row}_c{extracted.anchor_col}"
         f"_o{extracted.anchor_occurrence}_{side}{extension}"
     )
     path = os.path.join(preview_dir, filename)
-    with open(path, "wb") as file_handle:
-        file_handle.write(raw)
+    if callable(export_png):
+        export_png(path)
+        with open(path, "rb") as file_handle:
+            raw = file_handle.read()
+    else:
+        with open(path, "wb") as file_handle:
+            file_handle.write(raw)
     extracted.image = None
     extracted.source_path = path
     extracted.preview_path = path

@@ -41,7 +41,9 @@ Excel 통합 문서에 삽입된 이미지를 추출해, 같은 시트·셀 위�
 
 - Python 3.10 이상
 - Windows 10/11 권장
-- `PyQt6`, `openpyxl`, `Pillow`
+- `PyQt6`, `openpyxl`, `Pillow`, `pywin32`(Windows)
+- Internal 등 RMS/IRM 암호화 파일 사용 시 Microsoft Excel 데스크톱 앱과
+  해당 문서를 열 수 있는 회사 계정 권한
 
 설치:
 
@@ -75,6 +77,13 @@ python excel_image_inspector_gui.py
 
 지원 파일은 `.xlsx`, `.xlsm`입니다. 파일들의 시트 수나 순서가 달라도 사용할 수
 있으며, 같은 시트는 이미지 내용이 아닌 시트 이름을 기준으로 연결합니다.
+
+일반/Public 파일은 기존처럼 직접 읽습니다. Internal 등 Microsoft RMS/IRM 암호화가
+적용된 파일은 로컬 Microsoft Excel을 숨김으로 열어 Public 레이블로 바꾼 뒤 같은
+경로와 파일명으로 저장하고, 이후 기존의 빠른 로딩 방식을 사용합니다. 최초 변환은
+Excel의 권한 확인과 복호화 때문에 시간이 걸릴 수 있지만 다음 실행부터는 빠르게
+열립니다. 변환 중에는 같은 폴더에 임시 백업을 두며, 저장 또는 검증에 실패하면
+원본 Internal 파일을 자동으로 복구합니다. 변환이 성공하면 임시 백업은 삭제됩니다.
 
 ## 시트 합집합과 무결성
 
@@ -122,6 +131,7 @@ ID를 검증합니다. 원본 이미지는 올바른 역할 열에 정확히 한
 excel_image_inspector_gui.py  # 프로그램 진입점
 models.py                     # 추출 이미지와 검사 위치 모델
 excel_manager.py              # Excel 이미지 위치/원본 bytes 추출
+excel_com_adapter.py          # RMS/IRM 보안 Excel 읽기 전용 COM 어댑터
 inspection_service.py         # 시트 합집합, Double/Triple/Quadra 정렬 및 무결성 검사
 review_annotations.py         # 불량·메모 자동저장과 Excel 결과 추출
 sheet_mapping.py              # 자동/사용자 지정 시트 매핑과 사전 검증
