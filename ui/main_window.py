@@ -50,6 +50,7 @@ from ui.dialogs import (
     LoadSummaryDialog,
     UsageHelpDialog,
     create_preview_pane,
+    parse_waveform_attributes_from_path,
     swap_splitter_widgets,
     start_excel_jump,
 )
@@ -1192,6 +1193,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "이미지 오류", "이미지를 불러올 수 없습니다.")
             return
         role = {"ref": "Ref", "a": "비교A", "b": "비교B", "c": "비교C"}[side]
+        waveform_attributes = self._current_waveform_attributes()
+        version, temperature = waveform_attributes[side]
         viewer = ImageViewerDialog(
             image,
             f"{role} · {extracted.location_text}",
@@ -1200,6 +1203,11 @@ class MainWindow(QMainWindow):
             and self._preview_jump_available(side),
             jump_callback=lambda: self._jump_from_preview(side),
             comparison_available=True,
+            role=side,
+            workbook_path=self.state.workbook_paths.get(side, ""),
+            location_text=extracted.location_text,
+            version=version,
+            temperature=temperature,
         )
         if viewer.exec() == SHOW_COMPARISON_RESULT:
             enabled_sides = tuple(
@@ -1216,8 +1224,23 @@ class MainWindow(QMainWindow):
                 jump_callback=self._jump_from_preview,
                 jump_enabled_sides=enabled_sides,
                 role_order=self.state.preview_order,
+                waveform_attributes=waveform_attributes,
             )
             comparison.exec_maximized()
+
+    def _current_waveform_attributes(self) -> Dict[str, Tuple[str, str]]:
+        """열린 리스트의 입력값을 우선하고 없으면 파일명 기본값을 사용한다."""
+        if self.image_list_window is not None:
+            try:
+                return dict(self.image_list_window.waveform_attributes)
+            except RuntimeError:
+                pass
+        return {
+            role: parse_waveform_attributes_from_path(
+                self.state.workbook_paths.get(role, "")
+            )
+            for role in ROLE_ORDER
+        }
 
     def _show_help(self) -> None:
         UsageHelpDialog(self).exec()

@@ -4,7 +4,8 @@ import pytest
 from PIL import Image
 from PyQt6.QtCore import QEvent, QPoint, QPointF, Qt
 from PyQt6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtTest import QTest
+from PyQt6.QtWidgets import QApplication, QLabel, QLineEdit
 
 from models import MISSING_SHEET, ExtractedImage, InspectionItem
 from ui.dialogs import (
@@ -135,6 +136,32 @@ def test_image_viewer_comparison_button_returns_requested_result(qapp):
         dialog.deleteLater()
 
 
+def test_image_viewer_shows_role_excel_and_read_only_attributes(qapp):
+    dialog = ImageViewerDialog(
+        Image.new("RGB", (320, 180), (20, 40, 80)),
+        "확대",
+        role="b",
+        workbook_path="D:/waveforms/compare-b.xlsx",
+        location_text="MAIN · C30",
+        version="MVT99-99",
+        temperature="ROOM-25",
+    )
+    try:
+        dialog.show()
+        qapp.processEvents()
+
+        assert dialog.role_label.text() == "Excel 비교B"
+        assert dialog.metadata.text() == "compare-b.xlsx · MAIN · C30"
+        assert dialog.attribute_metadata.text() == (
+            "버전: MVT99-99 · 온도: ROOM-25"
+        )
+        assert isinstance(dialog.attribute_metadata, QLabel)
+        assert not isinstance(dialog.attribute_metadata, QLineEdit)
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_roles", "expected_positions"),
     [
@@ -154,10 +181,15 @@ def test_image_viewer_comparison_button_returns_requested_result(qapp):
 def test_comparison_dialog_builds_mode_specific_layout(
     qapp, mode, expected_roles, expected_positions
 ):
+    attributes = {
+        role: (f"VERSION-{role}", f"TEMP-{role}")
+        for role in expected_roles
+    }
     dialog = ImageComparisonDialog(
         _comparison_item(mode),
         mode,
         {role: f"{role}.xlsx" for role in expected_roles},
+        waveform_attributes=attributes,
     )
     try:
         dialog.showMaximized()
@@ -167,6 +199,19 @@ def test_comparison_dialog_builds_mode_specific_layout(
         assert tuple(dialog.panes) == expected_roles
         assert dialog.pane_positions == expected_positions
         assert all(pane.has_image for pane in dialog.panes.values())
+        for role, pane in dialog.panes.items():
+            assert pane.role_label.text() == {
+                "ref": "Excel Ref",
+                "a": "Excel 비교A",
+                "b": "Excel 비교B",
+                "c": "Excel 비교C",
+            }[role]
+            assert pane.metadata.text().startswith(f"{role}.xlsx · ")
+            assert pane.attribute_metadata.text() == (
+                f"버전: VERSION-{role} · 온도: TEMP-{role}"
+            )
+            assert isinstance(pane.attribute_metadata, QLabel)
+            assert not isinstance(pane.attribute_metadata, QLineEdit)
         assert dialog.isMaximized()
         assert dialog.windowFlags() & Qt.WindowType.WindowMaximizeButtonHint
     finally:
@@ -193,11 +238,16 @@ def test_comparison_dialog_builds_mode_specific_layout(
 def test_comparison_dialog_uses_reordered_list_layout(
     qapp, mode, role_order, expected_positions
 ):
+    attributes = {
+        role: (f"V-{role}", f"T-{role}")
+        for role in role_order
+    }
     dialog = ImageComparisonDialog(
         _comparison_item(mode),
         mode,
         {role: f"{role}.xlsx" for role in role_order},
         role_order=role_order,
+        waveform_attributes=attributes,
     )
     try:
         dialog.show()
@@ -208,6 +258,9 @@ def test_comparison_dialog_uses_reordered_list_layout(
         assert dialog.pane_positions == expected_positions
         for role in role_order:
             assert role in dialog.panes[role].metadata.text()
+            assert dialog.panes[role].attribute_metadata.text() == (
+                f"버전: V-{role} · 온도: T-{role}"
+            )
     finally:
         dialog.close()
         dialog.deleteLater()
@@ -729,6 +782,12 @@ def test_jump_button_calls_callback_when_enabled(qapp):
         dialog.show()
         qapp.processEvents()
         assert dialog.jump_button.isEnabled() is True
+        assert dialog.jump_button.autoDefault() is False
+        assert dialog.jump_button.isDefault() is False
+        dialog.jump_button.setFocus()
+        QTest.keyClick(dialog.jump_button, Qt.Key.Key_Return)
+        qapp.processEvents()
+        assert called == []
         dialog.jump_button.click()
         assert called == ["jump"]
     finally:

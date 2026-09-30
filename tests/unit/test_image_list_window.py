@@ -22,7 +22,7 @@ from models import (
     SheetInfo,
 )
 from review_annotations import ReviewAnnotationStore
-from ui.dialogs import ImageListWindow
+from ui.dialogs import ImageListWindow, parse_waveform_attributes_from_path
 from ui.theme import apply_theme
 
 
@@ -197,6 +197,79 @@ def test_duplicate_cell_text_shows_occurrence_and_warning():
 
     assert ImageListWindow._cell_text(extracted) == "D693 (2/3) ⚠"
     assert "동일 셀 중복" in extracted.location_text
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("report_M0E1_ROOM.xlsx", ("M0E1", "ROOM")),
+        ("report-m12e50-hot.xlsm", ("M12E50", "HOT")),
+        ("AER_M50E0_LOW.xlsx", ("M50E0", "LOW")),
+        ("AER_M51E2_HOT.xlsx", ("M51E2", "HOT")),
+        ("AER_MVT99-99_LOW.xlsx", ("MVT99-99", "LOW")),
+        ("no-attributes.xlsx", ("M0E0", "ROOM")),
+    ],
+)
+def test_waveform_attributes_are_parsed_from_excel_filename(filename, expected):
+    assert parse_waveform_attributes_from_path(filename) == expected
+
+
+@pytest.mark.parametrize("mode", ("double", "triple", "quadra"))
+def test_version_and_temperature_inputs_apply_to_every_list_mode(
+    qapp,
+    sample_items,
+    mode,
+):
+    paths = {
+        "ref": "D:/waveforms/reference_M0E1_ROOM.xlsx",
+        "a": "D:/waveforms/compare_M12E50_HOT.xlsx",
+        "b": "D:/waveforms/compare_M50E0_LOW.xlsx",
+        "c": "D:/waveforms/compare_M7E9_ROOM.xlsx",
+    }
+    expected = {
+        "ref": ("M0E1", "ROOM"),
+        "a": ("M12E50", "HOT"),
+        "b": ("M50E0", "LOW"),
+        "c": ("M7E9", "ROOM"),
+    }
+    window = ImageListWindow(
+        sample_items[mode],
+        mode,
+        paths,
+        initial_index=0,
+    )
+    try:
+        apply_theme(window)
+        window.show()
+        qapp.processEvents()
+
+        for role in dialogs_module.MODE_ROLES[mode]:
+            controls = window._preview_attribute_controls[role]
+            container = window._preview_containers[role]
+            assert controls.version_text == expected[role][0]
+            assert controls.temperature == expected[role][1]
+            assert controls.version_edit.sizeHint().width() >= (
+                controls.version_edit.fontMetrics().horizontalAdvance("MVT99-99")
+                + 18
+            )
+            assert controls.temperature_edit.sizeHint().width() == (
+                controls.version_edit.sizeHint().width()
+            )
+            assert controls.temperature_edit.alignment() == (
+                Qt.AlignmentFlag.AlignCenter
+            )
+            assert container.isAncestorOf(controls.version_edit)
+            assert container.isAncestorOf(controls.temperature_edit)
+
+        edited = window._preview_attribute_controls["ref"]
+        edited.version_edit.setText("REV-A_한글9!")
+        edited.temperature_edit.setText("CUSTOM-온도9!")
+        window.set_current_index(1)
+        qapp.processEvents()
+        assert edited.version_text == "REV-A_한글9!"
+        assert edited.temperature == "CUSTOM-온도9!"
+    finally:
+        _close_window(window, qapp)
 
 
 def test_double_table_initial_index_and_keyboard_update_preview_immediately(
@@ -802,6 +875,12 @@ def test_preview_jump_button_requires_hyperlink_mode_and_skips_missing_images(
         initial_index=0,
     )
     try:
+        memo_calls = []
+        monkeypatch.setattr(
+            window,
+            "_open_memo_editor",
+            lambda side: memo_calls.append(side),
+        )
         window.show()
         qapp.processEvents()
         assert window.ref_jump_button.text() == "엑셀 파형 바로가기"
@@ -815,6 +894,60 @@ def test_preview_jump_button_requires_hyperlink_mode_and_skips_missing_images(
         qapp.processEvents()
         assert window.ref_jump_button.isEnabled() is True
         assert window.a_jump_button.isEnabled() is True
+        for button in (
+            window.ref_jump_button,
+            window.a_jump_button,
+            window.b_jump_button,
+            window.c_jump_button,
+        ):
+            assert button.autoDefault() is False
+            assert button.isDefault() is False
+            assert button.focusPolicy() == Qt.FocusPolicy.NoFocus
+        for button in (
+            window.ref_memo_button,
+            window.a_memo_button,
+            window.b_memo_button,
+            window.c_memo_button,
+        ):
+            assert button.autoDefault() is False
+            assert button.isDefault() is False
+            assert button.focusPolicy() == Qt.FocusPolicy.NoFocus
+
+        window.table.setFocus()
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            QTest.keyClick(window.table, key)
+        qapp.processEvents()
+        assert jumps == []
+        assert memo_calls == []
+
+        window.ref_attribute_controls.version_edit.setFocus()
+        QTest.keyClick(
+            window.ref_attribute_controls.version_edit,
+            Qt.Key.Key_Return,
+        )
+        window.ref_attribute_controls.temperature_edit.setFocus()
+        QTest.keyClick(
+            window.ref_attribute_controls.temperature_edit,
+            Qt.Key.Key_Return,
+        )
+        qapp.processEvents()
+        assert jumps == []
+        assert memo_calls == []
+
+        window.ref_jump_button.setFocus()
+        QTest.keyClick(window.ref_jump_button, Qt.Key.Key_Return)
+        qapp.processEvents()
+        assert jumps == []
+        assert memo_calls == []
+
+        QTest.keyClick(window.ref_memo_button, Qt.Key.Key_Return)
+        QTest.keyClick(window.ref_memo_button, Qt.Key.Key_Enter)
+        qapp.processEvents()
+        assert memo_calls == []
+
+        QTest.mouseClick(window.ref_memo_button, Qt.MouseButton.LeftButton)
+        qapp.processEvents()
+        assert memo_calls == ["ref"]
 
         window.ref_jump_button.click()
         assert len(jumps) == 1
@@ -952,6 +1085,8 @@ def test_preview_role_swap_moves_whole_panels_in_every_mode(
     try:
         source_container = window._preview_containers[source_role]
         target_container = window._preview_containers[target_role]
+        source_controls = window._preview_attribute_controls[source_role]
+        source_controls.set_values("MVT99-99", "HOT")
 
         window._swap_preview_roles(source_role, target_role)
         qapp.processEvents()
@@ -961,6 +1096,9 @@ def test_preview_role_swap_moves_whole_panels_in_every_mode(
         assert emitted == [expected]
         assert window._preview_containers[source_role] is source_container
         assert window._preview_containers[target_role] is target_container
+        assert source_container.isAncestorOf(source_controls.version_edit)
+        assert source_controls.version_text == "MVT99-99"
+        assert source_controls.temperature == "HOT"
 
         window.set_current_index(1)
         qapp.processEvents()
@@ -1257,10 +1395,23 @@ def test_list_enlarge_can_open_maximized_comparison(
         initial_index=0,
     )
     try:
+        window.ref_attribute_controls.set_values("REF-VERSION", "REF-TEMP")
+        window.a_attribute_controls.set_values("A-VERSION", "A-TEMP")
+        window.b_attribute_controls.set_values("B-VERSION", "B-TEMP")
+        window.c_attribute_controls.set_values("C-VERSION", "C-TEMP")
         window._swap_preview_roles("ref", "c")
         window._enlarge("ref")
 
         assert captured["viewer_kwargs"]["comparison_available"] is True
+        assert captured["viewer_kwargs"]["role"] == "ref"
+        assert captured["viewer_kwargs"]["workbook_path"] == (
+            sample_items["paths"]["ref"]
+        )
+        assert captured["viewer_kwargs"]["location_text"] == (
+            sample_items["quadra"][0].image_ref.location_text
+        )
+        assert captured["viewer_kwargs"]["version"] == "REF-VERSION"
+        assert captured["viewer_kwargs"]["temperature"] == "REF-TEMP"
         assert captured["item"] is sample_items["quadra"][0]
         assert captured["mode"] == "quadra"
         assert captured["paths"] == sample_items["paths"]
@@ -1271,6 +1422,12 @@ def test_list_enlarge_can_open_maximized_comparison(
             "b",
             "ref",
         )
+        assert captured["comparison_kwargs"]["waveform_attributes"] == {
+            "ref": ("REF-VERSION", "REF-TEMP"),
+            "a": ("A-VERSION", "A-TEMP"),
+            "b": ("B-VERSION", "B-TEMP"),
+            "c": ("C-VERSION", "C-TEMP"),
+        }
         assert captured["maximized"] is True
     finally:
         _close_window(window, qapp)

@@ -1,6 +1,8 @@
 """육안 검사 화면에서 사용하는 확대 창과 이미지 리스트 창."""
 
 import os
+import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -17,7 +19,7 @@ from PyQt6.QtCore import (
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QDrag, QKeySequence, QPixmap, QShortcut
+from PyQt6.QtGui import QDrag, QKeyEvent, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -29,6 +31,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -64,6 +67,79 @@ from ui.widgets import ClickableLabel
 
 SHOW_COMPARISON_RESULT = 2
 _PREVIEW_ROLE_MIME = "application/x-image-inspection-preview-role"
+_WAVEFORM_VERSION_PATTERNS = (
+    re.compile(
+        r"(?<![A-Z0-9])M\d{1,2}E\d{1,2}(?![A-Z0-9])",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<![A-Z0-9])MVT\d{1,2}-\d{1,2}(?![A-Z0-9])",
+        re.IGNORECASE,
+    ),
+)
+_WAVEFORM_TEMPERATURE_PATTERN = re.compile(
+    r"(?<![A-Z0-9])(ROOM|HOT|LOW)(?![A-Z0-9])",
+    re.IGNORECASE,
+)
+class _CompactAttributeLineEdit(QLineEdit):
+    """대표적인 긴 속성 문자열이 온전히 보이는 자유 입력칸."""
+
+    _REFERENCE_TEXT = "MVT99-99"
+
+    def _compact_size_hint(self):
+        hint = super().sizeHint()
+        text_width = self.fontMetrics().horizontalAdvance(self._REFERENCE_TEXT)
+        hint.setWidth(max(78, text_width + 18))
+        return hint
+
+    def sizeHint(self):
+        return self._compact_size_hint()
+
+    def minimumSizeHint(self):
+        return self._compact_size_hint()
+
+
+def parse_waveform_attributes_from_path(path: str) -> Tuple[str, str]:
+    """파일명에서 알려진 버전 표기와 온도를 찾아 기본값과 함께 반환한다."""
+    filename = os.path.basename(str(path or ""))
+    version = "M0E0"
+    for pattern in _WAVEFORM_VERSION_PATTERNS:
+        version_match = pattern.search(filename)
+        if version_match is not None:
+            version = version_match.group(0).upper()
+            break
+    temperature_match = _WAVEFORM_TEMPERATURE_PATTERN.search(filename)
+    temperature = (
+        temperature_match.group(1).upper()
+        if temperature_match is not None
+        else "ROOM"
+    )
+    return version, temperature
+
+
+def waveform_attribute_text(version: str, temperature: str) -> str:
+    """확대 화면에 표시할 읽기 전용 버전·온도 문구를 만든다."""
+    return f"버전: {str(version).strip() or '-'} · 온도: {str(temperature).strip() or '-'}"
+
+
+@dataclass(frozen=True)
+class PreviewAttributeControls:
+    """한 Excel 미리보기 패널에 속한 버전·온도 입력 위젯."""
+
+    version_edit: QLineEdit
+    temperature_edit: QLineEdit
+
+    @property
+    def version_text(self) -> str:
+        return self.version_edit.text()
+
+    @property
+    def temperature(self) -> str:
+        return self.temperature_edit.text()
+
+    def set_values(self, version: str, temperature: str) -> None:
+        self.version_edit.setText(str(version))
+        self.temperature_edit.setText(str(temperature))
 
 
 class _DraggablePreviewTitle(QLabel):
@@ -381,6 +457,11 @@ class ImageViewerDialog(QDialog):
         jump_enabled: bool = False,
         jump_callback: Optional[Callable[[], None]] = None,
         comparison_available: bool = False,
+        role: Optional[str] = None,
+        workbook_path: str = "",
+        location_text: str = "",
+        version: str = "",
+        temperature: str = "",
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -429,9 +510,37 @@ class ImageViewerDialog(QDialog):
         )
         self.jump_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.jump_button.setEnabled(bool(jump_enabled) and jump_callback is not None)
+        self.jump_button.setAutoDefault(False)
+        self.jump_button.setDefault(False)
+        self.jump_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.jump_button.clicked.connect(self._on_jump_clicked)
         toolbar.addWidget(self.jump_button)
         layout.addLayout(toolbar)
+
+        context_available = role is not None
+        self.role_label = QLabel(
+            ROLE_DISPLAY_NAMES.get(role, str(role or ""))
+        )
+        self.role_label.setObjectName("previewTitle")
+        self.role_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.role_label.setVisible(context_available)
+        layout.addWidget(self.role_label)
+
+        filename = os.path.basename(workbook_path) if workbook_path else "-"
+        self.metadata = QLabel(f"{filename} · {location_text or '-'}")
+        self.metadata.setObjectName("imageMeta")
+        self.metadata.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.metadata.setWordWrap(True)
+        self.metadata.setVisible(context_available)
+        layout.addWidget(self.metadata)
+
+        self.attribute_metadata = QLabel(
+            waveform_attribute_text(version, temperature)
+        )
+        self.attribute_metadata.setObjectName("waveformAttributeMeta")
+        self.attribute_metadata.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.attribute_metadata.setVisible(context_available)
+        layout.addWidget(self.attribute_metadata)
 
         self._scroll = _ZoomScrollArea(self._zoom_at)
         self._scroll.setWidgetResizable(False)
@@ -537,6 +646,8 @@ class _ComparisonImagePane(QWidget):
         extracted: Optional[ExtractedImage],
         workbook_path: str,
         *,
+        version: str = "",
+        temperature: str = "",
         jump_callback: Optional[Callable[[], None]] = None,
         zoom_request_callback: Optional[
             Callable[[str, float, QPointF], None]
@@ -554,13 +665,16 @@ class _ComparisonImagePane(QWidget):
         layout.setContentsMargins(3, 3, 3, 3)
         layout.setSpacing(4)
         header = QHBoxLayout()
-        title = QLabel(ROLE_DISPLAY_NAMES.get(role, role.upper()))
-        title.setObjectName("previewTitle")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header.addWidget(title, stretch=1)
+        self.role_label = QLabel(ROLE_DISPLAY_NAMES.get(role, role.upper()))
+        self.role_label.setObjectName("previewTitle")
+        self.role_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(self.role_label, stretch=1)
         self.jump_button = QPushButton("엑셀 파형 바로가기")
         self.jump_button.setObjectName("inputActionBtn")
         self.jump_button.setEnabled(jump_callback is not None)
+        self.jump_button.setAutoDefault(False)
+        self.jump_button.setDefault(False)
+        self.jump_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         if jump_callback is not None:
             self.jump_button.clicked.connect(jump_callback)
         header.addWidget(self.jump_button)
@@ -573,6 +687,13 @@ class _ComparisonImagePane(QWidget):
         self.metadata.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.metadata.setWordWrap(True)
         layout.addWidget(self.metadata)
+
+        self.attribute_metadata = QLabel(
+            waveform_attribute_text(version, temperature)
+        )
+        self.attribute_metadata.setObjectName("waveformAttributeMeta")
+        self.attribute_metadata.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.attribute_metadata)
 
         self._scroll = _ZoomScrollArea(self._zoom_at)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -791,6 +912,7 @@ class ImageComparisonDialog(QDialog):
         jump_callback: Optional[Callable[[str], None]] = None,
         jump_enabled_sides: Sequence[str] = (),
         role_order: Optional[Sequence[str]] = None,
+        waveform_attributes: Optional[Dict[str, Tuple[str, str]]] = None,
     ) -> None:
         super().__init__(parent)
         if mode not in MODE_ROLES:
@@ -854,6 +976,7 @@ class ImageComparisonDialog(QDialog):
         root.addLayout(self._grid, stretch=1)
 
         extracted_by_role = dict(item.side_images())
+        attributes_by_role = dict(waveform_attributes or {})
         enabled_sides = set(jump_enabled_sides)
         roles = self.role_order
         positions = (
@@ -865,10 +988,16 @@ class ImageComparisonDialog(QDialog):
             pane_jump = None
             if jump_callback is not None and role in enabled_sides:
                 pane_jump = lambda owned_role=role: jump_callback(owned_role)
+            version, temperature = attributes_by_role.get(
+                role,
+                parse_waveform_attributes_from_path(workbook_paths.get(role, "")),
+            )
             pane = _ComparisonImagePane(
                 role,
                 extracted_by_role.get(role),
                 workbook_paths.get(role, ""),
+                version=version,
+                temperature=temperature,
                 jump_callback=pane_jump,
                 zoom_request_callback=self._on_pane_zoom_requested,
                 parent=self,
@@ -1030,6 +1159,9 @@ def create_preview_pane(
     )
     jump_button.setEnabled(False)
     jump_button.setCursor(Qt.CursorShape.PointingHandCursor)
+    jump_button.setAutoDefault(False)
+    jump_button.setDefault(False)
+    jump_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     jump_button.setSizePolicy(
         QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
     )
@@ -1061,19 +1193,71 @@ def create_review_preview_pane(
     QCheckBox,
     QPushButton,
     QPushButton,
+    PreviewAttributeControls,
 ]:
     """리스트 창용 불량·메모 컨트롤이 포함된 미리보기 칸."""
     container, title, metadata, image, jump_button = create_preview_pane(
         default_title
     )
     container.setObjectName("reviewPreviewContainer")
+
+    container_layout = container.layout()
+    title_item = container_layout.takeAt(0)
+    if title_item is None or title_item.widget() is not title:
+        raise RuntimeError("미리보기 제목 레이아웃을 구성할 수 없습니다.")
+    title_header = QGridLayout()
+    title_header.setContentsMargins(0, 0, 0, 0)
+    title_header.setHorizontalSpacing(6)
+    title_header.setVerticalSpacing(1)
+    title_header.addWidget(title, 0, 0, 2, 1)
+    title_header.setColumnStretch(0, 1)
+
+    version_label = QLabel("버전")
+    version_label.setObjectName("previewAttributeLabel")
+    version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    version_edit = _CompactAttributeLineEdit()
+    version_edit.setObjectName("previewVersionEdit")
+    version_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    version_edit.setPlaceholderText("M0E0")
+    version_edit.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+    version_edit.setToolTip(
+        "버전을 자유롭게 입력합니다. 문자·숫자·기호를 모두 사용할 수 있으며, "
+        "긴 값은 입력칸 안에서 좌우로 이동합니다."
+    )
+    title_header.addWidget(version_label, 0, 1)
+    title_header.addWidget(version_edit, 1, 1)
+
+    temperature_label = QLabel("온도")
+    temperature_label.setObjectName("previewAttributeLabel")
+    temperature_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    temperature_edit = _CompactAttributeLineEdit()
+    temperature_edit.setObjectName("previewTemperatureEdit")
+    temperature_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    temperature_edit.setPlaceholderText("ROOM")
+    temperature_edit.setSizePolicy(
+        QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
+    )
+    temperature_edit.setToolTip(
+        "온도 문구를 자유롭게 입력합니다. 문자·숫자·기호를 모두 사용할 수 있습니다."
+    )
+    title_header.addWidget(temperature_label, 0, 2)
+    title_header.addWidget(temperature_edit, 1, 2)
+    container_layout.insertLayout(0, title_header)
+    attribute_controls = PreviewAttributeControls(
+        version_edit=version_edit,
+        temperature_edit=temperature_edit,
+    )
+
     defect_check = QCheckBox("불량")
     defect_check.setObjectName("defectCheck")
     defect_check.setToolTip("이 이미지가 불량일 때만 체크합니다.")
     memo_button = QPushButton("메모")
     memo_button.setObjectName("memoButton")
     memo_button.setToolTip("불량 체크와 관계없이 메모를 작성할 수 있습니다.")
-    metadata_row = container.layout().itemAt(1).layout()
+    memo_button.setAutoDefault(False)
+    memo_button.setDefault(False)
+    memo_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    metadata_row = container_layout.itemAt(1).layout()
     metadata_row.insertWidget(
         1, defect_check, 0, Qt.AlignmentFlag.AlignVCenter
     )
@@ -1088,6 +1272,7 @@ def create_review_preview_pane(
         defect_check,
         memo_button,
         jump_button,
+        attribute_controls,
     )
 
 
@@ -1272,6 +1457,8 @@ Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 원본 
 • 위: 전체 / 시트 / No. / Ref 셀 / 비교A 셀 (Triple이면 비교B 셀, Quadra이면 비교C 셀까지)
 • 아래: 선택한 행의 이미지. Double·Triple은 가로로, Quadra는 Ref|A / B|C 2×2
 • 미리보기: 시트명·셀주소는 가운데, [엑셀 파형 바로가기]는 오른쪽 끝
+• 각 Excel 제목 오른쪽에서 자유 형식 버전과 온도 문구를 확인·수정합니다.
+  파일명에 M숫자E숫자 또는 MVT숫자-숫자와 온도가 있으면 처음 열 때 자동으로 입력됩니다.
 • Excel 이름 제목을 다른 이미지 칸으로 드래그하면 두 칸의 표시 위치가 서로 바뀝니다.
 • 바꾼 순서는 행·시트를 이동하거나 리스트를 다시 열어도 유지되며, 새 Excel 묶음을 불러오면 기본 순서로 돌아갑니다.
 • 한 번 클릭 또는 ↑/↓: 미리보기만 바뀝니다. Excel은 열리지 않습니다.
@@ -1302,8 +1489,10 @@ Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 원본 
 • Ctrl + 좌클릭 드래그로 확대된 이미지 이동
 • [창에 맞춤] 또는 0 키
 • [실제 크기]
+• 상단 정보: 해당 파형의 Ref/비교 역할, Excel 파일명·위치, 버전·온도를 읽기 전용으로 표시
 • [다른파형 함께보기]: 현재 위치의 Ref/비교A/비교B/비교C를 모드에 맞춰 최대화 창으로 표시
   - 리스트에서 순서를 바꿨다면 함께보기와 메인 미리보기도 같은 배열을 사용합니다.
+  - 각 파형의 버전·온도는 리스트 입력값을 읽기 전용으로 표시합니다.
 • 오른쪽 위 [엑셀 파형 바로가기]: 하이퍼링크 모드가 켜져 있으면 그 이미지의 Excel 칸으로 이동합니다.
 창 크기를 바꾸면 맞춤 모드일 때 이미지도 다시 맞춰집니다.
 함께보기 창은 제목 표시줄을 더블클릭해 최대화하거나 원래 크기로 복원할 수 있습니다.
@@ -1550,6 +1739,7 @@ class ImageListWindow(QDialog):
             self.ref_defect_check,
             self.ref_memo_button,
             self.ref_jump_button,
+            self.ref_attribute_controls,
         ) = self._create_preview_pane("Excel Ref")
         (
             self.a_container,
@@ -1559,6 +1749,7 @@ class ImageListWindow(QDialog):
             self.a_defect_check,
             self.a_memo_button,
             self.a_jump_button,
+            self.a_attribute_controls,
         ) = self._create_preview_pane("Excel 비교A")
         (
             self.b_container,
@@ -1568,6 +1759,7 @@ class ImageListWindow(QDialog):
             self.b_defect_check,
             self.b_memo_button,
             self.b_jump_button,
+            self.b_attribute_controls,
         ) = self._create_preview_pane("Excel 비교B")
         (
             self.c_container,
@@ -1577,6 +1769,7 @@ class ImageListWindow(QDialog):
             self.c_defect_check,
             self.c_memo_button,
             self.c_jump_button,
+            self.c_attribute_controls,
         ) = self._create_preview_pane("Excel 비교C")
         self._preview_containers = {
             "ref": self.ref_container,
@@ -1590,6 +1783,18 @@ class ImageListWindow(QDialog):
             "b": self.b_title,
             "c": self.c_title,
         }
+        self._preview_attribute_controls = {
+            "ref": self.ref_attribute_controls,
+            "a": self.a_attribute_controls,
+            "b": self.b_attribute_controls,
+            "c": self.c_attribute_controls,
+        }
+        for role, controls in self._preview_attribute_controls.items():
+            controls.set_values(
+                *parse_waveform_attributes_from_path(
+                    self._workbook_paths.get(role, "")
+                )
+            )
         for role in MODE_ROLES[mode]:
             title_widget = self._preview_titles[role]
             container_widget = self._preview_containers[role]
@@ -1696,12 +1901,28 @@ class ImageListWindow(QDialog):
         QCheckBox,
         QPushButton,
         QPushButton,
+        PreviewAttributeControls,
     ]:
         return create_review_preview_pane(default_title)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Enter가 대화상자의 자동 기본 버튼을 실행하지 않게 한다."""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     @property
     def preview_order(self) -> Tuple[str, ...]:
         return self._preview_order
+
+    @property
+    def waveform_attributes(self) -> Dict[str, Tuple[str, str]]:
+        """역할별로 리스트에서 입력한 버전·온도 문구를 반환한다."""
+        return {
+            role: (controls.version_text, controls.temperature)
+            for role, controls in self._preview_attribute_controls.items()
+        }
 
     def _preview_slot(self, index: int) -> Tuple[QSplitter, int]:
         if self._mode == "quadra":
@@ -2418,6 +2639,7 @@ class ImageListWindow(QDialog):
         if image is None:
             return
         role = {"ref": "Ref", "a": "비교A", "b": "비교B", "c": "비교C"}[side]
+        version, temperature = self.waveform_attributes[side]
         viewer = ImageViewerDialog(
             image,
             f"{role} · {extracted.location_text}",
@@ -2426,6 +2648,11 @@ class ImageListWindow(QDialog):
             and self._preview_jump_available(side),
             jump_callback=lambda: self._jump_from_preview(side),
             comparison_available=True,
+            role=side,
+            workbook_path=self._workbook_paths.get(side, ""),
+            location_text=extracted.location_text,
+            version=version,
+            temperature=temperature,
         )
         result = viewer.exec()
         if result == SHOW_COMPARISON_RESULT and not self._closing:
@@ -2443,6 +2670,7 @@ class ImageListWindow(QDialog):
                 jump_callback=self._jump_from_preview,
                 jump_enabled_sides=enabled_sides,
                 role_order=self._preview_order,
+                waveform_attributes=self.waveform_attributes,
             )
             comparison.exec_maximized()
         try:

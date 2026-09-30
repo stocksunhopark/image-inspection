@@ -49,6 +49,14 @@ QLabel#imageMeta {
     color: #94a3b8;
     padding: 2px;
 }
+QLabel#waveformAttributeMeta {
+    color: #bae6fd;
+    background-color: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 3px 6px;
+    font-weight: 600;
+}
 QLabel#statusBusy { color: #fbbf24; font-weight: 600; }
 QLabel#statusIdle { color: #93c5fd; }
 QGroupBox {
@@ -135,6 +143,15 @@ QPushButton:disabled {
     background-color: #334155;
     border-color: #334155;
     color: #94a3b8;
+}
+QLabel#previewAttributeLabel {
+    color: #93c5fd;
+    font-size: 10px;
+    font-weight: 700;
+}
+QLineEdit#previewVersionEdit,
+QLineEdit#previewTemperatureEdit {
+    padding: 2px 5px;
 }
 QPushButton#pathResetButton {
     background-color: #334155;
