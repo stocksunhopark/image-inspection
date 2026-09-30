@@ -7,9 +7,10 @@ from typing import Dict
 
 import pytest
 from PIL import Image
-from PyQt6.QtCore import QSettings, QTimer, Qt
+from PyQt6.QtCore import QByteArray, QEvent, QMimeData, QPointF, QSettings, QTimer, Qt
+from PyQt6.QtGui import QMouseEvent, QPixmap
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLabel
 
 import ui.dialogs as dialogs_module
 import ui.main_window as main_window_module
@@ -22,6 +23,7 @@ from models import (
 )
 from review_annotations import ReviewAnnotationStore
 from ui.dialogs import ImageListWindow
+from ui.theme import apply_theme
 
 
 @pytest.fixture(scope="module")
@@ -145,6 +147,40 @@ def _source_rgb(label) -> tuple[int, int, int]:
 def _close_window(window: ImageListWindow, qapp: QApplication) -> None:
     window.close()
     qapp.processEvents()
+
+
+def _physical_preview_order(window: ImageListWindow) -> tuple[str, ...]:
+    role_by_container = {
+        id(container): role
+        for role, container in window._preview_containers.items()
+    }
+    if window._mode == "quadra":
+        widgets = (
+            window.quadra_top.widget(0),
+            window.quadra_top.widget(1),
+            window.quadra_bottom.widget(0),
+            window.quadra_bottom.widget(1),
+        )
+    else:
+        widgets = tuple(
+            window.preview_splitter.widget(index)
+            for index in range(len(window.preview_order))
+        )
+    return tuple(role_by_container[id(widget)] for widget in widgets)
+
+
+def _border_color_pixel_count(widget, color: str) -> int:
+    pixmap = QPixmap(widget.size())
+    pixmap.fill(Qt.GlobalColor.transparent)
+    widget.render(pixmap)
+    image = pixmap.toImage()
+    expected = color.lower()
+    return sum(
+        image.pixelColor(x, y).name().lower() == expected
+        for y in range(image.height())
+        for x in range(image.width())
+        if x < 4 or y < 4 or x >= image.width() - 4 or y >= image.height() - 4
+    )
 
 
 def test_duplicate_cell_text_shows_occurrence_and_warning():
@@ -873,6 +909,7 @@ def test_list_enlarge_jump_follows_hyperlink_mode(
         qapp.processEvents()
         window._enlarge("ref")
         assert captured["kwargs"]["jump_enabled"] is False
+        assert captured["kwargs"]["comparison_available"] is True
         captured["callback"]()
         assert jumps == []
 
@@ -884,6 +921,357 @@ def test_list_enlarge_jump_follows_hyperlink_mode(
         assert len(jumps) == 1
         assert jumps[0][0].endswith("compare-a.xlsx")
         assert jumps[0][2] == "A1"
+    finally:
+        _close_window(window, qapp)
+
+
+@pytest.mark.parametrize(
+    ("mode", "source_role", "target_role", "expected"),
+    [
+        ("double", "ref", "a", ("a", "ref")),
+        ("triple", "ref", "b", ("b", "a", "ref")),
+        ("quadra", "ref", "c", ("c", "a", "b", "ref")),
+    ],
+)
+def test_preview_role_swap_moves_whole_panels_in_every_mode(
+    qapp,
+    sample_items,
+    mode,
+    source_role,
+    target_role,
+    expected,
+):
+    window = ImageListWindow(
+        sample_items[mode],
+        mode,
+        sample_items["paths"],
+        initial_index=0,
+    )
+    emitted = []
+    window.preview_order_changed.connect(emitted.append)
+    try:
+        source_container = window._preview_containers[source_role]
+        target_container = window._preview_containers[target_role]
+
+        window._swap_preview_roles(source_role, target_role)
+        qapp.processEvents()
+
+        assert window.preview_order == expected
+        assert _physical_preview_order(window) == expected
+        assert emitted == [expected]
+        assert window._preview_containers[source_role] is source_container
+        assert window._preview_containers[target_role] is target_container
+
+        window.set_current_index(1)
+        qapp.processEvents()
+        assert window.preview_order == expected
+        assert _physical_preview_order(window) == expected
+
+        window._swap_preview_roles(source_role, source_role)
+        window._swap_preview_roles(source_role, "not-a-role")
+        assert emitted == [expected]
+    finally:
+        _close_window(window, qapp)
+
+
+def test_quadra_drag_signal_swaps_cross_row_and_keeps_role_callbacks(
+    qapp,
+    sample_items,
+    monkeypatch,
+):
+    window = ImageListWindow(
+        sample_items["quadra"],
+        "quadra",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    calls = []
+    try:
+        window.c_container.preview_swap_requested.emit("ref", "c")
+        qapp.processEvents()
+        assert window.preview_order == ("c", "a", "b", "ref")
+        assert _physical_preview_order(window) == ("c", "a", "b", "ref")
+        assert window.quadra_top.widget(0) is window.c_container
+        assert window.quadra_bottom.widget(1) is window.ref_container
+        assert not window.quadra_top.handle(1).isEnabled()
+        assert not window.quadra_bottom.handle(1).isEnabled()
+
+        monkeypatch.setattr(window, "_enlarge", lambda side: calls.append(("open", side)))
+        monkeypatch.setattr(
+            window,
+            "_jump_from_preview",
+            lambda side: calls.append(("jump", side)),
+        )
+        monkeypatch.setattr(
+            window,
+            "_toggle_defect",
+            lambda side, checked: calls.append(("defect", side, checked)),
+        )
+        monkeypatch.setattr(
+            window,
+            "_open_memo_editor",
+            lambda side: calls.append(("memo", side)),
+        )
+        QTest.mouseClick(window.ref_image, Qt.MouseButton.LeftButton)
+        window.hyperlink_check.setChecked(True)
+        window.ref_jump_button.click()
+        window.ref_defect_check.click()
+        window.ref_memo_button.click()
+
+        assert ("open", "ref") in calls
+        assert ("jump", "ref") in calls
+        assert ("defect", "ref", True) in calls
+        assert ("memo", "ref") in calls
+    finally:
+        _close_window(window, qapp)
+
+
+def test_drag_payload_accepts_only_another_role_from_the_same_list_window(
+    qapp,
+    sample_items,
+):
+    window = ImageListWindow(
+        sample_items["quadra"],
+        "quadra",
+        sample_items["paths"],
+    )
+
+    class FakeDragEvent:
+        def __init__(self, source, role=None):
+            self._source = source
+            self._mime = QMimeData()
+            self.accepted = False
+            self.ignored = False
+            self.drop_action = None
+            if role is not None:
+                self._mime.setData(
+                    dialogs_module._PREVIEW_ROLE_MIME,
+                    QByteArray(role.encode("ascii")),
+                )
+
+        def source(self):
+            return self._source
+
+        def mimeData(self):
+            return self._mime
+
+        def setDropAction(self, action):
+            self.drop_action = action
+
+        def accept(self):
+            self.accepted = True
+
+        def ignore(self):
+            self.ignored = True
+
+    try:
+        assert window.ref_title.drag_role == "ref"
+        assert window.c_container.drop_role == "c"
+        assert window.c_container._source_role(
+            FakeDragEvent(window.ref_title, "ref")
+        ) == "ref"
+        assert window.ref_container._source_role(
+            FakeDragEvent(window.ref_title, "ref")
+        ) is None
+        assert window.c_container._source_role(
+            FakeDragEvent(window.ref_title, "unknown")
+        ) is None
+        assert window.c_container._source_role(
+            FakeDragEvent(window.ref_title, "a")
+        ) is None
+        assert window.c_container._source_role(
+            FakeDragEvent(QLabel("external"), "ref")
+        ) is None
+        assert window.c_container._source_role(
+            FakeDragEvent(window.ref_title)
+        ) is None
+
+        enter = FakeDragEvent(window.ref_title, "ref")
+        window.c_container.dragEnterEvent(enter)
+        assert enter.accepted is True
+        assert window.c_container.property("dragTarget") is True
+        leave = FakeDragEvent(window.ref_title)
+        window.c_container.dragLeaveEvent(leave)
+        assert leave.accepted is True
+        assert window.c_container.property("dragTarget") is False
+
+        drop = FakeDragEvent(window.ref_title, "ref")
+        window.c_container.dropEvent(drop)
+        assert drop.accepted is True
+        assert drop.ignored is False
+        assert drop.drop_action == Qt.DropAction.MoveAction
+        assert window.preview_order == ("c", "a", "b", "ref")
+    finally:
+        _close_window(window, qapp)
+
+
+def test_title_starts_move_drag_only_after_mouse_threshold(
+    qapp,
+    sample_items,
+    monkeypatch,
+):
+    drags = []
+
+    class FakeDrag:
+        def __init__(self, source):
+            self.source = source
+            self.mime = None
+            self.exec_args = None
+            drags.append(self)
+
+        def setMimeData(self, mime):
+            self.mime = mime
+
+        def setPixmap(self, _pixmap):
+            pass
+
+        def setHotSpot(self, _position):
+            pass
+
+        def exec(self, *args):
+            self.exec_args = args
+            return Qt.DropAction.MoveAction
+
+    monkeypatch.setattr(dialogs_module, "QDrag", FakeDrag)
+    window = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+    )
+    try:
+        window.show()
+        qapp.processEvents()
+        title = window.ref_title
+        start = QPointF(5, 5)
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            start,
+            QPointF(title.mapToGlobal(start.toPoint())),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(title, press)
+        short_position = QPointF(5 + max(1, QApplication.startDragDistance() - 1), 5)
+        short_move = QMouseEvent(
+            QEvent.Type.MouseMove,
+            short_position,
+            QPointF(title.mapToGlobal(short_position.toPoint())),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(title, short_move)
+        assert drags == []
+
+        far_position = QPointF(5 + QApplication.startDragDistance() + 2, 5)
+        far_move = QMouseEvent(
+            QEvent.Type.MouseMove,
+            far_position,
+            QPointF(title.mapToGlobal(far_position.toPoint())),
+            Qt.MouseButton.NoButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(title, far_move)
+
+        assert len(drags) == 1
+        assert drags[0].source is title
+        assert bytes(
+            drags[0].mime.data(dialogs_module._PREVIEW_ROLE_MIME)
+        ) == b"ref"
+        assert drags[0].exec_args == (
+            Qt.DropAction.MoveAction,
+            Qt.DropAction.MoveAction,
+        )
+    finally:
+        _close_window(window, qapp)
+
+
+def test_custom_preview_order_is_applied_at_list_creation(qapp, sample_items):
+    order = ("c", "b", "a", "ref")
+    window = ImageListWindow(
+        sample_items["quadra"],
+        "quadra",
+        sample_items["paths"],
+        preview_order=order,
+    )
+    try:
+        assert window.preview_order == order
+        assert _physical_preview_order(window) == order
+    finally:
+        _close_window(window, qapp)
+
+
+def test_reordered_missing_image_stays_with_its_semantic_role(qapp, sample_items):
+    window = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+        initial_index=1,
+    )
+    try:
+        window._swap_preview_roles("ref", "a")
+        qapp.processEvents()
+
+        assert window.preview_splitter.widget(0) is window.a_container
+        assert window.preview_splitter.widget(1) is window.ref_container
+        assert "이미지가 없습니다" in window.a_image.text()
+        assert window.ref_image.pixmap() is not None
+    finally:
+        _close_window(window, qapp)
+
+
+def test_list_enlarge_can_open_maximized_comparison(
+    qapp,
+    monkeypatch,
+    sample_items,
+):
+    captured = {}
+
+    class FakeViewer:
+        def __init__(self, *args, **kwargs):
+            captured["viewer_kwargs"] = kwargs
+
+        def exec(self):
+            return dialogs_module.SHOW_COMPARISON_RESULT
+
+    class FakeComparison:
+        def __init__(self, item, mode, paths, parent, **kwargs):
+            captured["item"] = item
+            captured["mode"] = mode
+            captured["paths"] = paths
+            captured["parent"] = parent
+            captured["comparison_kwargs"] = kwargs
+
+        def exec_maximized(self):
+            captured["maximized"] = True
+            return 0
+
+    monkeypatch.setattr(dialogs_module, "ImageViewerDialog", FakeViewer)
+    monkeypatch.setattr(dialogs_module, "ImageComparisonDialog", FakeComparison)
+    window = ImageListWindow(
+        sample_items["quadra"],
+        "quadra",
+        sample_items["paths"],
+        initial_index=0,
+    )
+    try:
+        window._swap_preview_roles("ref", "c")
+        window._enlarge("ref")
+
+        assert captured["viewer_kwargs"]["comparison_available"] is True
+        assert captured["item"] is sample_items["quadra"][0]
+        assert captured["mode"] == "quadra"
+        assert captured["paths"] == sample_items["paths"]
+        assert captured["parent"] is window
+        assert captured["comparison_kwargs"]["role_order"] == (
+            "c",
+            "a",
+            "b",
+            "ref",
+        )
+        assert captured["maximized"] is True
     finally:
         _close_window(window, qapp)
 
@@ -907,6 +1295,47 @@ def test_list_preview_header_keeps_jump_button_at_right(qapp, sample_items):
             window.ref_jump_button,
             qapp,
         )
+    finally:
+        _close_window(window, qapp)
+
+
+def test_defect_and_drag_target_borders_render_on_custom_preview_container(
+    qapp,
+    tmp_path: Path,
+    sample_items,
+):
+    store = ReviewAnnotationStore(
+        sample_items["paths"],
+        "double",
+        storage_path=tmp_path / "border-render-annotations.json",
+    )
+    window = ImageListWindow(
+        sample_items["double"],
+        "double",
+        sample_items["paths"],
+        annotation_store=store,
+    )
+    try:
+        apply_theme(window)
+        window.resize(1200, 800)
+        window.show()
+        qapp.processEvents()
+        assert window.ref_container.testAttribute(
+            Qt.WidgetAttribute.WA_StyledBackground
+        )
+
+        window.ref_defect_check.setChecked(True)
+        qapp.processEvents()
+        assert window.ref_container.property("defectMarked") is True
+        assert _border_color_pixel_count(window.ref_container, "#ef4444") > 0
+
+        window.ref_container._set_drag_target(True)
+        qapp.processEvents()
+        assert _border_color_pixel_count(window.ref_container, "#22d3ee") > 0
+
+        window.ref_container._set_drag_target(False)
+        qapp.processEvents()
+        assert _border_color_pixel_count(window.ref_container, "#ef4444") > 0
     finally:
         _close_window(window, qapp)
 

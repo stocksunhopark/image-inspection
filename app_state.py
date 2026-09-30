@@ -1,9 +1,15 @@
 """Qt에 의존하지 않는 Double/Triple/Quadra 이미지 탐색 상태."""
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from models import IntegrityReport, SUPPORTED_MODES, InspectionItem, SheetInfo
+from models import (
+    IntegrityReport,
+    SUPPORTED_MODES,
+    InspectionItem,
+    SheetInfo,
+    normalize_preview_order,
+)
 
 
 @dataclass
@@ -16,9 +22,15 @@ class AppState:
     sheet_infos: Dict[int, SheetInfo] = field(default_factory=dict)
     integrity_report: Optional[IntegrityReport] = None
     load_warnings: List[str] = field(default_factory=list)
+    preview_order: Tuple[str, ...] = field(
+        default_factory=lambda: normalize_preview_order("double")
+    )
     _flat_items: List[InspectionItem] = field(
         default_factory=list, init=False, repr=False
     )
+
+    def __post_init__(self) -> None:
+        self.preview_order = normalize_preview_order(self.mode, self.preview_order)
 
     @property
     def flat_items(self) -> List[InspectionItem]:
@@ -45,6 +57,8 @@ class AppState:
         if mode not in SUPPORTED_MODES:
             raise ValueError(f"지원하지 않는 검사 모드: {mode}")
         self.mode = mode
+        # 새로 불러온 비교 묶음은 언제나 의미가 분명한 기본 배열로 시작한다.
+        self.preview_order = normalize_preview_order(mode)
         self.items_by_sheet = {
             int(sheet_index): list(items)
             for sheet_index, items in sorted(items_by_sheet.items())
@@ -69,7 +83,14 @@ class AppState:
         self.sheet_infos = {}
         self.integrity_report = None
         self.load_warnings = []
+        self.preview_order = normalize_preview_order(self.mode)
         self._flat_items = []
+
+    def set_preview_order(self, role_order: Sequence[str]) -> bool:
+        normalized = normalize_preview_order(self.mode, role_order)
+        changed = normalized != self.preview_order
+        self.preview_order = normalized
+        return changed
 
     def move(self, offset: int) -> bool:
         items = self.flat_items

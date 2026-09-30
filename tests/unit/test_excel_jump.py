@@ -1,13 +1,18 @@
 """리스트 칸에서 Excel 이동 대상을 고르는 순수 로직."""
 
+import base64
+import sys
 import time
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 from models import ExtractedImage, InspectionItem
 from excel_jump import (
     _bring_excel_to_front,
     _bring_hwnd_to_front,
     _excel_window_hwnd,
+    _jump_with_powershell,
+    _jump_with_win32com,
+    _scroll_target_with_context,
     jump_target_for_list_cell,
     jump_target_for_side,
     jump_to_excel_cell,
@@ -124,6 +129,109 @@ def test_jump_to_excel_cell_returns_without_waiting(monkeypatch):
     while not started and time.perf_counter() < deadline:
         time.sleep(0.01)
     assert started
+
+
+def test_scroll_target_shows_seven_rows_above_in_active_pane():
+    pane = SimpleNamespace(ScrollRow=0)
+    window = SimpleNamespace(ActivePane=pane, ScrollRow=0)
+    excel = SimpleNamespace(ActiveWindow=window)
+
+    _scroll_target_with_context(excel, SimpleNamespace(Row=70))
+    assert pane.ScrollRow == 63
+
+    _scroll_target_with_context(excel, SimpleNamespace(Row=2))
+    assert pane.ScrollRow == 1
+
+
+def test_scroll_target_falls_back_to_window_when_active_pane_rejects_scroll():
+    class RejectingPane:
+        @property
+        def ScrollRow(self):
+            return 0
+
+        @ScrollRow.setter
+        def ScrollRow(self, _value):
+            raise RuntimeError("pane scrolling unavailable")
+
+    window = SimpleNamespace(ActivePane=RejectingPane(), ScrollRow=0)
+    excel = SimpleNamespace(ActiveWindow=window)
+
+    _scroll_target_with_context(excel, SimpleNamespace(Row=10))
+
+    assert window.ScrollRow == 3
+
+
+def test_win32com_jump_selects_target_then_adds_visible_row_context(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "book.xlsx"
+    path.touch()
+    target_cell = SimpleNamespace(Row=70)
+    activated = []
+
+    class Worksheet:
+        def Activate(self):
+            activated.append("worksheet")
+
+        def Range(self, address):
+            assert address == "D70"
+            return target_cell
+
+    worksheet = Worksheet()
+    workbook = SimpleNamespace(
+        FullName=str(path),
+        Activate=lambda: activated.append("workbook"),
+        Worksheets=lambda name: worksheet if name == "MAIN" else None,
+    )
+    pane = SimpleNamespace(ScrollRow=0)
+    goto_calls = []
+    excel = SimpleNamespace(
+        Visible=False,
+        Workbooks=[workbook],
+        ActiveWindow=SimpleNamespace(ActivePane=pane, ScrollRow=0),
+        Goto=lambda target, scroll: goto_calls.append((target, scroll)),
+    )
+    client_module = ModuleType("win32com.client")
+    client_module.GetActiveObject = lambda _name: excel
+    win32com_module = ModuleType("win32com")
+    win32com_module.__path__ = []
+    win32com_module.client = client_module
+    monkeypatch.setitem(sys.modules, "win32com", win32com_module)
+    monkeypatch.setitem(sys.modules, "win32com.client", client_module)
+    brought = []
+    monkeypatch.setattr(
+        "excel_jump._bring_excel_to_front",
+        lambda actual_excel, actual_workbook: brought.append(
+            (actual_excel, actual_workbook)
+        ),
+    )
+
+    assert _jump_with_win32com(str(path), "MAIN", "D70") is True
+    assert activated == ["workbook", "worksheet"]
+    assert goto_calls == [(target_cell, True)]
+    assert pane.ScrollRow == 63
+    assert brought == [(excel, workbook)]
+
+
+def test_powershell_jump_adds_same_seven_row_context(monkeypatch):
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr("excel_jump.subprocess.run", fake_run)
+
+    _jump_with_powershell(r"C:\waveforms\book.xlsx", "MAIN", "D70")
+
+    command, kwargs = commands[0]
+    script = base64.b64decode(command[-1]).decode("utf-16le")
+    assert "$targetCell = $worksheet.Range($cell)" in script
+    assert "$excel.Goto($targetCell, $true)" in script
+    assert "[Math]::Max(1, [int]$targetCell.Row - 7)" in script
+    assert "$excel.ActiveWindow.ActivePane.ScrollRow = $scrollRow" in script
+    assert "$excel.ActiveWindow.ScrollRow = $scrollRow" in script
+    assert kwargs["timeout"] == 45
 
 
 class _FakeUser32:

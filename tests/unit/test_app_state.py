@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from app_state import AppState
-from models import ExtractedImage, InspectionItem
+from models import (
+    ExtractedImage,
+    InspectionItem,
+    normalize_preview_order,
+    swapped_preview_order,
+)
 
 
 def _image(
@@ -192,4 +197,66 @@ def test_invalid_mode_is_rejected_without_mutating_existing_state():
     assert state.current_item is existing
     assert state.workbook_paths == {"ref": "ref.xlsx", "a": "a.xlsx"}
     assert state.preview_temp_dir == "preview"
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("double", ("ref", "a")),
+        ("triple", ("ref", "a", "b")),
+        ("quadra", ("ref", "a", "b", "c")),
+    ],
+)
+def test_preview_order_uses_every_role_for_the_loaded_mode(mode, expected):
+    state = AppState()
+    item = _item(
+        1,
+        1,
+        "A1",
+        triple=mode == "triple",
+        quadra=mode == "quadra",
+    )
+
+    state.set_items({1: [item]}, mode=mode)
+
+    assert state.preview_order == expected
+
+
+def test_preview_order_is_semantic_session_state_and_new_load_resets_it():
+    first = _item(1, 1, "A1", quadra=True)
+    second = _item(2, 1, "B2", quadra=True)
+    state = AppState()
+    state.set_items(
+        {1: [first]},
+        mode="quadra",
+        workbook_paths={"ref": "ref.xlsx", "c": "c.xlsx"},
+    )
+
+    assert state.set_preview_order(("c", "a", "b", "ref")) is True
+    assert state.preview_order == ("c", "a", "b", "ref")
+    assert state.current_item.image_ref is first.image_ref
+    assert state.current_item.image_c is first.image_c
+    assert state.workbook_paths == {"ref": "ref.xlsx", "c": "c.xlsx"}
+    assert state.set_preview_order(("c", "a", "b", "ref")) is False
+
+    state.set_items({2: [second]}, mode="quadra")
+    assert state.preview_order == ("ref", "a", "b", "c")
+
+    state.set_preview_order(("c", "b", "a", "ref"))
+    state.clear()
+    assert state.preview_order == ("ref", "a", "b", "c")
+
+
+def test_preview_order_helpers_fill_missing_roles_and_only_swap_valid_roles():
+    assert normalize_preview_order("triple", ("b", "b", "other")) == (
+        "b",
+        "ref",
+        "a",
+    )
+    assert swapped_preview_order(
+        "quadra", ("ref", "a", "b", "c"), "ref", "c"
+    ) == ("c", "a", "b", "ref")
+    assert swapped_preview_order(
+        "double", ("ref", "a"), "ref", "c"
+    ) == ("ref", "a")
 

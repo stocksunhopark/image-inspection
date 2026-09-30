@@ -2,7 +2,7 @@
 
 import os
 import shutil
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 
 from PyQt6.QtCore import QSettings, QSignalBlocker, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSplitter,
     QVBoxLayout,
@@ -29,18 +30,27 @@ from PyQt6.QtWidgets import (
 from app_state import AppState
 from excel_jump import jump_target_for_side
 from excel_manager import load_extracted_pil
-from models import ROLE_ORDER, SUPPORTED_MODES, ExtractedImage, mode_label
+from models import (
+    ROLE_ORDER,
+    SUPPORTED_MODES,
+    ExtractedImage,
+    mode_label,
+    normalize_preview_order,
+)
 from sheet_mapping import (
     SheetMappingPlan,
     build_sheet_mapping_from_paths,
     sheet_mapping_input_signature,
 )
 from ui.dialogs import (
+    SHOW_COMPARISON_RESULT,
+    ImageComparisonDialog,
     ImageListWindow,
     ImageViewerDialog,
     LoadSummaryDialog,
     UsageHelpDialog,
     create_preview_pane,
+    swap_splitter_widgets,
     start_excel_jump,
 )
 from ui.helpers import pil_to_pixmap
@@ -66,6 +76,7 @@ class MainWindow(QMainWindow):
         self._sheet_mapping_signature = None
         self.image_list_window: Optional[ImageListWindow] = None
         self._close_pending = False
+        self._close_confirmed = False
         self._owned_temp_dirs = set()
         self._build_ui()
         self._build_menu()
@@ -106,45 +117,71 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(self.triple_check)
         mode_row.addWidget(self.quadra_check)
         mode_row.addStretch(1)
-        input_layout.addLayout(mode_row, 0, 0, 1, 3)
+        input_layout.addLayout(mode_row, 0, 0, 1, 4)
 
-        self.file_ref_edit, self.file_ref_button = self._add_file_row(
-            input_layout, 1, "Excel Ref", "기준 Excel 파일"
+        (
+            self.file_ref_label,
+            self.file_ref_edit,
+            self.file_ref_reset_button,
+            self.file_ref_button,
+        ) = self._add_file_row(
+            input_layout, 1, "Excel Ref", "기준 Excel 파일", "path_ref"
         )
-        self.file_a_edit, self.file_a_button = self._add_file_row(
-            input_layout, 2, "Excel 비교A", "첫 번째 비교 Excel 파일"
+        (
+            self.file_a_label,
+            self.file_a_edit,
+            self.file_a_reset_button,
+            self.file_a_button,
+        ) = self._add_file_row(
+            input_layout, 2, "Excel A", "첫 번째 비교 Excel 파일", "path_a"
         )
-        self.b_row = QWidget()
-        b_layout = QGridLayout(self.b_row)
-        b_layout.setContentsMargins(0, 0, 0, 0)
-        self.file_b_edit = DropLineEdit()
-        self.file_b_edit.setPlaceholderText(".xlsx 또는 .xlsm 경로 입력/끌어놓기")
-        self.file_b_button = QPushButton("파일 선택")
-        self.file_b_button.clicked.connect(
-            lambda: self._pick_file(self.file_b_edit)
+        (
+            self.file_b_label,
+            self.file_b_edit,
+            self.file_b_reset_button,
+            self.file_b_button,
+        ) = self._add_file_row(
+            input_layout, 3, "Excel B", "두 번째 비교 Excel 파일", "path_b"
         )
-        b_layout.addWidget(QLabel("Excel 비교B"), 0, 0)
-        b_layout.addWidget(self.file_b_edit, 0, 1)
-        b_layout.addWidget(self.file_b_button, 0, 2)
-        b_layout.setColumnStretch(1, 1)
-        input_layout.addWidget(self.b_row, 3, 0, 1, 3)
 
-        self.c_row = QWidget()
-        c_layout = QGridLayout(self.c_row)
-        c_layout.setContentsMargins(0, 0, 0, 0)
-        self.file_c_edit = DropLineEdit()
-        self.file_c_edit.setPlaceholderText(".xlsx 또는 .xlsm 경로 입력/끌어놓기")
-        self.file_c_button = QPushButton("파일 선택")
-        self.file_c_button.clicked.connect(
-            lambda: self._pick_file(self.file_c_edit)
+        (
+            self.file_c_label,
+            self.file_c_edit,
+            self.file_c_reset_button,
+            self.file_c_button,
+        ) = self._add_file_row(
+            input_layout, 4, "Excel C", "세 번째 비교 Excel 파일", "path_c"
         )
-        c_layout.addWidget(QLabel("Excel 비교C"), 0, 0)
-        c_layout.addWidget(self.file_c_edit, 0, 1)
-        c_layout.addWidget(self.file_c_button, 0, 2)
-        c_layout.setColumnStretch(1, 1)
-        input_layout.addWidget(self.c_row, 4, 0, 1, 3)
+        self._file_input_rows = {
+            "ref": (
+                self.file_ref_label,
+                self.file_ref_edit,
+                self.file_ref_reset_button,
+                self.file_ref_button,
+            ),
+            "a": (
+                self.file_a_label,
+                self.file_a_edit,
+                self.file_a_reset_button,
+                self.file_a_button,
+            ),
+            "b": (
+                self.file_b_label,
+                self.file_b_edit,
+                self.file_b_reset_button,
+                self.file_b_button,
+            ),
+            "c": (
+                self.file_c_label,
+                self.file_c_edit,
+                self.file_c_reset_button,
+                self.file_c_button,
+            ),
+        }
 
         action_row = QHBoxLayout()
+        action_row.setSpacing(4)
+        self.input_action_row = action_row
         self.load_button = QPushButton("이미지 불러오기")
         self.cancel_button = QPushButton("취소")
         self.sheet_mapping_button = QPushButton("시트순서설정")
@@ -162,14 +199,18 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Excel 파일을 선택해 주세요.")
         self.status_label.setObjectName("statusIdle")
         action_row.addWidget(self.status_label)
-        input_layout.addLayout(action_row, 5, 0, 1, 3)
+        input_layout.addLayout(action_row, 5, 0, 1, 4)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        input_layout.addWidget(self.progress_bar, 6, 0, 1, 3)
+        input_layout.addWidget(self.progress_bar, 6, 0, 1, 4)
         input_layout.setColumnStretch(1, 1)
         layout.addWidget(input_group)
+        self._fit_file_input_columns()
+        input_layout.setColumnMinimumWidth(0, self._file_input_label_width)
+        input_layout.setColumnMinimumWidth(2, self._file_input_reset_width)
+        input_layout.setColumnMinimumWidth(3, self._file_input_select_width)
 
         navigation_group = QGroupBox("검사 이미지 이동")
         navigation = QVBoxLayout(navigation_group)
@@ -254,6 +295,13 @@ class MainWindow(QMainWindow):
             self.c_image,
             self.c_jump_button,
         ) = self._create_preview_pane("Excel 비교C")
+        self._preview_containers = {
+            "ref": self.ref_container,
+            "a": self.a_container,
+            "b": self.b_container,
+            "c": self.c_container,
+        }
+        self._preview_layout_order = list(ROLE_ORDER)
         for container in (
             self.ref_container,
             self.a_container,
@@ -295,16 +343,53 @@ class MainWindow(QMainWindow):
         row: int,
         label: str,
         tooltip: str,
-    ) -> Tuple[DropLineEdit, QPushButton]:
+        settings_key: str,
+    ) -> Tuple[QLabel, DropLineEdit, QPushButton, QPushButton]:
+        label_widget = QLabel(label)
         edit = DropLineEdit()
         edit.setPlaceholderText(".xlsx 또는 .xlsm 경로 입력/끌어놓기")
         edit.setToolTip(tooltip)
+        reset_button = QPushButton("경로 reset")
+        reset_button.setObjectName("pathResetButton")
+        reset_button.setToolTip(f"{label} 경로를 비우고 저장된 경로를 초기화합니다.")
+        reset_button.clicked.connect(
+            lambda: self._reset_file_path(edit, settings_key)
+        )
         button = QPushButton("파일 선택")
         button.clicked.connect(lambda: self._pick_file(edit))
-        layout.addWidget(QLabel(label), row, 0)
+        for row_button in (reset_button, button):
+            row_button.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Fixed,
+            )
+        layout.addWidget(label_widget, row, 0)
         layout.addWidget(edit, row, 1)
-        layout.addWidget(button, row, 2)
-        return edit, button
+        layout.addWidget(reset_button, row, 2)
+        layout.addWidget(button, row, 3)
+        layout.setColumnStretch(1, 1)
+        return label_widget, edit, reset_button, button
+
+    def _fit_file_input_columns(self) -> None:
+        labels = tuple(row[0] for row in self._file_input_rows.values())
+        reset_buttons = tuple(row[2] for row in self._file_input_rows.values())
+        select_buttons = tuple(row[3] for row in self._file_input_rows.values())
+        for widget in (*labels, *reset_buttons, *select_buttons):
+            widget.ensurePolished()
+        self._file_input_label_width = max(
+            label.sizeHint().width() for label in labels
+        )
+        self._file_input_reset_width = max(
+            button.sizeHint().width() for button in reset_buttons
+        )
+        self._file_input_select_width = max(
+            button.sizeHint().width() for button in select_buttons
+        )
+        for label in labels:
+            label.setFixedWidth(self._file_input_label_width)
+        for button in reset_buttons:
+            button.setFixedWidth(self._file_input_reset_width)
+        for button in select_buttons:
+            button.setFixedWidth(self._file_input_select_width)
 
     def _create_preview_pane(
         self, default_title: str
@@ -387,15 +472,55 @@ class MainWindow(QMainWindow):
             return
         self._on_input_mode_changed()
 
+    def _apply_preview_order(
+        self,
+        mode: str,
+        role_order: Sequence[str],
+    ) -> None:
+        normalized = normalize_preview_order(mode, role_order)
+        desired_layout = list(normalized) + [
+            role for role in ROLE_ORDER if role not in normalized
+        ]
+        for target_index, target_role in enumerate(desired_layout):
+            current_index = self._preview_layout_order.index(target_role)
+            if current_index == target_index:
+                continue
+            current_role = self._preview_layout_order[target_index]
+            swap_splitter_widgets(
+                self.preview_splitter,
+                target_index,
+                self._preview_containers[current_role],
+                self.preview_splitter,
+                current_index,
+                self._preview_containers[target_role],
+            )
+            (
+                self._preview_layout_order[target_index],
+                self._preview_layout_order[current_index],
+            ) = (
+                self._preview_layout_order[current_index],
+                self._preview_layout_order[target_index],
+            )
+        for handle_index in range(1, self.preview_splitter.count()):
+            self.preview_splitter.handle(handle_index).setEnabled(False)
+
     def _apply_preview_mode(self, mode: str) -> None:
+        role_order = (
+            self.state.preview_order
+            if self.state.flat_items and mode == self.state.mode
+            else normalize_preview_order(mode)
+        )
+        self._apply_preview_order(mode, role_order)
         self.b_container.setVisible(mode in {"triple", "quadra"})
         self.c_container.setVisible(mode == "quadra")
         self._equalize_preview_panes(mode)
 
     def _on_input_mode_changed(self) -> None:
         selected = self._selected_mode()
-        self.b_row.setVisible(selected in {"triple", "quadra"})
-        self.c_row.setVisible(selected == "quadra")
+        for widget in self._file_input_rows["b"]:
+            widget.setVisible(selected in {"triple", "quadra"})
+        for widget in self._file_input_rows["c"]:
+            widget.setVisible(selected == "quadra")
         if not self.state.flat_items:
             self._apply_preview_mode(selected)
         elif selected != self.state.mode:
@@ -420,6 +545,15 @@ class MainWindow(QMainWindow):
         if path:
             target.setText(path)
             self.settings.setValue("last_directory", os.path.dirname(path))
+
+    def _reset_file_path(self, target: DropLineEdit, settings_key: str) -> None:
+        if self.load_thread is not None:
+            return
+        target.clear()
+        target.setFocus(Qt.FocusReason.MouseFocusReason)
+        self.settings.remove(settings_key)
+        self.settings.setValue("last_directory", "D:\\")
+        self.settings.sync()
 
     def _start_loading(self) -> None:
         if self.load_thread is not None:
@@ -478,9 +612,9 @@ class MainWindow(QMainWindow):
             paths["c"] = self.file_c_edit.text().strip()
         labels = {
             "ref": "Excel Ref",
-            "a": "Excel 비교A",
-            "b": "Excel 비교B",
-            "c": "Excel 비교C",
+            "a": "Excel A",
+            "b": "Excel B",
+            "c": "Excel C",
         }
         missing = [labels[role] for role, path in paths.items() if not path]
         return mode, paths, missing
@@ -675,6 +809,10 @@ class MainWindow(QMainWindow):
             self.file_a_button,
             self.file_b_button,
             self.file_c_button,
+            self.file_ref_reset_button,
+            self.file_a_reset_button,
+            self.file_b_reset_button,
+            self.file_c_reset_button,
             self.load_button,
             self.sheet_mapping_button,
         ):
@@ -766,6 +904,7 @@ class MainWindow(QMainWindow):
             self._sync_preview_jump_buttons()
             return
 
+        self._apply_preview_order(self.state.mode, self.state.preview_order)
         current = self.state.current_index
         self.current_mode_label.setText(f"현재 결과: {mode_label(self.state.mode)}")
         sheet_position, sheet_total = self.state.current_sheet_position()
@@ -989,6 +1128,7 @@ class MainWindow(QMainWindow):
                 self.image_list_window.apply_hyperlink_mode(
                     self.hyperlink_check.isChecked()
                 )
+                self.image_list_window.set_preview_order(self.state.preview_order)
                 return
             except RuntimeError:
                 self.image_list_window = None
@@ -998,6 +1138,7 @@ class MainWindow(QMainWindow):
             self.state.mode,
             self.state.workbook_paths,
             initial_index=self.state.current_index,
+            preview_order=self.state.preview_order,
             parent=self,
         )
         self.image_list_window = window
@@ -1008,6 +1149,7 @@ class MainWindow(QMainWindow):
             lambda _result=0, owned=window: self._on_image_list_destroyed(owned)
         )
         window.hyperlink_mode_changed.connect(self._on_list_hyperlink_mode_changed)
+        window.preview_order_changed.connect(self._on_list_preview_order_changed)
         window.apply_hyperlink_mode(self.hyperlink_check.isChecked())
         window.show()
         window.raise_()
@@ -1016,6 +1158,12 @@ class MainWindow(QMainWindow):
     def _on_image_list_destroyed(self, window: ImageListWindow) -> None:
         if self.image_list_window is window:
             self.image_list_window = None
+
+    def _on_list_preview_order_changed(self, role_order) -> None:
+        if not self.state.set_preview_order(tuple(role_order)):
+            return
+        self._apply_preview_order(self.state.mode, self.state.preview_order)
+        self._equalize_preview_panes(self.state.mode)
 
     def _close_image_list_window(self) -> None:
         if self.image_list_window is None:
@@ -1044,14 +1192,32 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "이미지 오류", "이미지를 불러올 수 없습니다.")
             return
         role = {"ref": "Ref", "a": "비교A", "b": "비교B", "c": "비교C"}[side]
-        ImageViewerDialog(
+        viewer = ImageViewerDialog(
             image,
             f"{role} · {extracted.location_text}",
             self,
             jump_enabled=self.hyperlink_check.isChecked()
             and self._preview_jump_available(side),
             jump_callback=lambda: self._jump_from_preview(side),
-        ).exec()
+            comparison_available=True,
+        )
+        if viewer.exec() == SHOW_COMPARISON_RESULT:
+            enabled_sides = tuple(
+                owned_side
+                for owned_side, _extracted in item.side_images()
+                if self.hyperlink_check.isChecked()
+                and self._preview_jump_available(owned_side)
+            )
+            comparison = ImageComparisonDialog(
+                item,
+                self.state.mode,
+                self.state.workbook_paths,
+                self,
+                jump_callback=self._jump_from_preview,
+                jump_enabled_sides=enabled_sides,
+                role_order=self.state.preview_order,
+            )
+            comparison.exec_maximized()
 
     def _show_help(self) -> None:
         UsageHelpDialog(self).exec()
@@ -1086,6 +1252,19 @@ class MainWindow(QMainWindow):
         self._owned_temp_dirs.discard(resolved)
 
     def closeEvent(self, event) -> None:
+        if not self._close_confirmed:
+            answer = QMessageBox.question(
+                self,
+                "프로그램 종료",
+                "프로그램을 종료 하시겠습니까? (즐거운 하루 되세요)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._close_confirmed = True
+
         if self.load_thread is not None and self.load_thread.isRunning():
             self._close_pending = True
             self._cancel_loading()

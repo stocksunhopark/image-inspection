@@ -4,6 +4,7 @@ from pathlib import Path
 
 from PIL import Image
 from PyQt6.QtCore import QSettings
+from PyQt6.QtWidgets import QMessageBox
 
 import ui.main_window as main_window_module
 from models import MISSING_SHEET, ExtractedImage, InspectionItem, SheetInfo
@@ -45,6 +46,45 @@ def _window(tmp_path, monkeypatch):
         ),
     )
     return main_window_module.MainWindow()
+
+
+def test_main_window_closes_only_after_exit_confirmation(
+    qapp, tmp_path, monkeypatch
+):
+    window = _window(tmp_path, monkeypatch)
+    calls = []
+
+    def answer_no(parent, title, message, buttons, default_button):
+        calls.append((parent, title, message, buttons, default_button))
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(main_window_module.QMessageBox, "question", answer_no)
+    try:
+        window.show()
+        qapp.processEvents()
+
+        assert window.close() is False
+        assert window.isVisible()
+        assert len(calls) == 1
+        assert calls[0][0] is window
+        assert calls[0][1] == "프로그램 종료"
+        assert calls[0][2] == "프로그램을 종료 하시겠습니까? (즐거운 하루 되세요)"
+        assert calls[0][3] == (
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        assert calls[0][4] == QMessageBox.StandardButton.No
+
+        monkeypatch.setattr(
+            main_window_module.QMessageBox,
+            "question",
+            lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        )
+        assert window.close() is True
+        assert not window.isVisible()
+    finally:
+        window._close_confirmed = True
+        window.close()
+        window.deleteLater()
 
 
 def test_load_summary_dialog_uses_fixed_scrollable_text_area(qapp):
@@ -242,8 +282,8 @@ def test_quadra_shows_fourth_image(qapp, tmp_path, monkeypatch):
         assert not window.b_container.isHidden()
         assert not window.c_container.isHidden()
         assert window.c_image.pixmap() is not None
-        assert not window.b_row.isHidden()
-        assert not window.c_row.isHidden()
+        assert all(not widget.isHidden() for widget in window._file_input_rows["b"])
+        assert all(not widget.isHidden() for widget in window._file_input_rows["c"])
     finally:
         window.close()
         window.deleteLater()
@@ -256,28 +296,163 @@ def test_mode_checkboxes_are_exclusive(qapp, tmp_path, monkeypatch):
         assert window.double_check.isChecked()
         assert not window.triple_check.isChecked()
         assert not window.quadra_check.isChecked()
-        assert window.b_row.isHidden()
-        assert window.c_row.isHidden()
+        assert all(widget.isHidden() for widget in window._file_input_rows["b"])
+        assert all(widget.isHidden() for widget in window._file_input_rows["c"])
 
         window.triple_check.setChecked(True)
         assert window.triple_check.isChecked()
         assert not window.double_check.isChecked()
         assert not window.quadra_check.isChecked()
-        assert not window.b_row.isHidden()
-        assert window.c_row.isHidden()
+        assert all(not widget.isHidden() for widget in window._file_input_rows["b"])
+        assert all(widget.isHidden() for widget in window._file_input_rows["c"])
 
         window.quadra_check.setChecked(True)
         assert window.quadra_check.isChecked()
         assert not window.double_check.isChecked()
         assert not window.triple_check.isChecked()
-        assert not window.b_row.isHidden()
-        assert not window.c_row.isHidden()
+        assert all(not widget.isHidden() for widget in window._file_input_rows["b"])
+        assert all(not widget.isHidden() for widget in window._file_input_rows["c"])
 
         window.quadra_check.setChecked(False)
         assert window.quadra_check.isChecked()
         assert not window.double_check.isChecked()
         assert not window.triple_check.isChecked()
         assert window._selected_mode() == "quadra"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_each_excel_row_has_unclipped_path_reset_before_file_select(
+    qapp, tmp_path, monkeypatch
+):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.resize(900, 650)
+        window.quadra_check.setChecked(True)
+        window.show()
+        qapp.processEvents()
+
+        rows = (
+            (
+                window.file_ref_label,
+                window.file_ref_edit,
+                window.file_ref_reset_button,
+                window.file_ref_button,
+            ),
+            (
+                window.file_a_label,
+                window.file_a_edit,
+                window.file_a_reset_button,
+                window.file_a_button,
+            ),
+            (
+                window.file_b_label,
+                window.file_b_edit,
+                window.file_b_reset_button,
+                window.file_b_button,
+            ),
+            (
+                window.file_c_label,
+                window.file_c_edit,
+                window.file_c_reset_button,
+                window.file_c_button,
+            ),
+        )
+        assert [row[0].text() for row in rows] == [
+            "Excel Ref",
+            "Excel A",
+            "Excel B",
+            "Excel C",
+        ]
+        expected_columns = [
+            (widget.geometry().left(), widget.geometry().right(), widget.width())
+            for widget in rows[0]
+        ]
+        for label, edit, reset_button, select_button in rows:
+            assert reset_button.text() == "경로 reset"
+            assert select_button.text() == "파일 선택"
+            assert reset_button.objectName() == "pathResetButton"
+            assert reset_button.parentWidget() is select_button.parentWidget()
+            assert reset_button.geometry().right() < select_button.geometry().left()
+            assert label.width() == window._file_input_label_width
+            assert reset_button.width() == window._file_input_reset_width
+            assert select_button.width() == window._file_input_select_width
+            assert reset_button.width() >= reset_button.sizeHint().width()
+            assert select_button.width() >= select_button.sizeHint().width()
+            assert edit.width() > 100
+            assert [
+                (widget.geometry().left(), widget.geometry().right(), widget.width())
+                for widget in (label, edit, reset_button, select_button)
+            ] == expected_columns
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_path_reset_clears_only_its_row_and_saved_value(
+    qapp, tmp_path, monkeypatch
+):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.quadra_check.setChecked(True)
+        rows = {
+            "path_ref": (window.file_ref_edit, window.file_ref_reset_button),
+            "path_a": (window.file_a_edit, window.file_a_reset_button),
+            "path_b": (window.file_b_edit, window.file_b_reset_button),
+            "path_c": (window.file_c_edit, window.file_c_reset_button),
+        }
+
+        for reset_key, (_reset_edit, reset_button) in rows.items():
+            expected = {}
+            for key, (edit, _button) in rows.items():
+                value = f"C:/waveforms/{key}.xlsx"
+                edit.setText(value)
+                window.settings.setValue(key, value)
+                expected[key] = value
+
+            reset_button.click()
+
+            for key, (edit, _button) in rows.items():
+                if key == reset_key:
+                    assert edit.text() == ""
+                    assert window.settings.value(key, "", type=str) == ""
+                else:
+                    assert edit.text() == expected[key]
+                    assert window.settings.value(key, "", type=str) == expected[key]
+            assert window.settings.value("last_directory", "", type=str) == "D:\\"
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_file_select_starts_at_d_drive_after_path_reset(
+    qapp, tmp_path, monkeypatch
+):
+    window = _window(tmp_path, monkeypatch)
+    dialog_calls = []
+
+    def fake_get_open_file_name(parent, title, start, file_filter):
+        dialog_calls.append((parent, title, start, file_filter))
+        return "", ""
+
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getOpenFileName",
+        fake_get_open_file_name,
+    )
+    try:
+        window.file_ref_edit.setText("C:/previous/location/ref.xlsx")
+        window.settings.setValue("last_directory", "C:/previous/location")
+
+        window.file_ref_reset_button.click()
+        window.file_ref_button.click()
+
+        assert len(dialog_calls) == 1
+        assert dialog_calls[0][0] is window
+        assert dialog_calls[0][1] == "Excel 파일 선택"
+        assert dialog_calls[0][2] == "D:\\"
+        assert dialog_calls[0][3] == "Excel 통합 문서 (*.xlsx *.xlsm)"
     finally:
         window.close()
         window.deleteLater()
@@ -293,12 +468,21 @@ def test_main_has_sheet_order_button_next_to_loading_controls(
         assert window.load_button.text() == "이미지 불러오기"
         assert window.cancel_button.text() == "취소"
         assert window.sheet_mapping_button.text() == "시트순서설정"
+        assert window.input_action_row.spacing() == 4
         assert window.sheet_mapping_button.isEnabled()
 
         window._set_loading(True)
         assert not window.sheet_mapping_button.isEnabled()
+        assert not window.file_ref_reset_button.isEnabled()
+        assert not window.file_a_reset_button.isEnabled()
+        assert not window.file_b_reset_button.isEnabled()
+        assert not window.file_c_reset_button.isEnabled()
         window._set_loading(False)
         assert window.sheet_mapping_button.isEnabled()
+        assert window.file_ref_reset_button.isEnabled()
+        assert window.file_a_reset_button.isEnabled()
+        assert window.file_b_reset_button.isEnabled()
+        assert window.file_c_reset_button.isEnabled()
     finally:
         window.close()
         window.deleteLater()
@@ -313,12 +497,18 @@ def test_usage_help_covers_modes_list_and_hyperlink(qapp):
     assert "리스트실행" in USAGE_HELP_TEXT
     assert "하이퍼링크 모드" in USAGE_HELP_TEXT
     assert "엑셀 파형 바로가기" in USAGE_HELP_TEXT
+    assert "위쪽 7개 행" in USAGE_HELP_TEXT
     assert "오른쪽 끝" in USAGE_HELP_TEXT
     assert "PASS/FAIL" in USAGE_HELP_TEXT
     assert "Ctrl+Enter" in USAGE_HELP_TEXT
     assert "시트순서설정" in USAGE_HELP_TEXT
+    assert "경로 reset" in USAGE_HELP_TEXT
     assert "자동 매핑 복원" in USAGE_HELP_TEXT
     assert "비교 그룹 추가" in USAGE_HELP_TEXT
+    assert "다른파형 함께보기" in USAGE_HELP_TEXT
+    assert "모든 파형이 같은 비율 위치로 함께 움직입니다" in USAGE_HELP_TEXT
+    assert "Excel 이름 제목을 다른 이미지 칸으로 드래그" in USAGE_HELP_TEXT
+    assert "함께보기와 메인 미리보기도 같은 배열" in USAGE_HELP_TEXT
     dialog = UsageHelpDialog()
     try:
         assert dialog.windowTitle() == "사용 방법"
@@ -447,6 +637,7 @@ def test_main_enlarge_jump_follows_hyperlink_mode(qapp, tmp_path, monkeypatch):
         window._render_current()
         window._enlarge("ref")
         assert captured["kwargs"]["jump_enabled"] is False
+        assert captured["kwargs"]["comparison_available"] is True
         captured["callback"]()
         assert jumps == []
 
@@ -586,6 +777,135 @@ def test_quadra_main_preview_jump_buttons(qapp, tmp_path, monkeypatch):
         assert [item[2] for item in jumps] == ["C1", "D1"]
         assert jumps[0][0].endswith("b.xlsx")
         assert jumps[1][0].endswith("c.xlsx")
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_list_preview_order_updates_main_reopens_and_resets_on_new_load(
+    qapp, tmp_path, monkeypatch
+):
+    item = InspectionItem(
+        1,
+        1,
+        _extracted(
+            _png(tmp_path / "ref-order.png", (200, 20, 20)),
+            sheet_index=1,
+            sheet_name="MAIN",
+            cell="A1",
+        ),
+        _extracted(
+            _png(tmp_path / "a-order.png", (20, 200, 20)),
+            sheet_index=1,
+            sheet_name="MAIN",
+            cell="B1",
+        ),
+        _extracted(
+            _png(tmp_path / "b-order.png", (20, 20, 200)),
+            sheet_index=1,
+            sheet_name="MAIN",
+            cell="C1",
+        ),
+        _extracted(
+            _png(tmp_path / "c-order.png", (200, 200, 20)),
+            sheet_index=1,
+            sheet_name="MAIN",
+            cell="D1",
+        ),
+    )
+    paths = {role: f"{role}.xlsx" for role in ("ref", "a", "b", "c")}
+    window = _window(tmp_path, monkeypatch)
+
+    def main_physical_order():
+        role_by_container = {
+            id(container): role
+            for role, container in window._preview_containers.items()
+        }
+        return tuple(
+            role_by_container[id(window.preview_splitter.widget(index))]
+            for index in range(4)
+        )
+
+    try:
+        window.show()
+        window.state.set_items({1: [item]}, mode="quadra", workbook_paths=paths)
+        window._populate_sheet_combo()
+        window._apply_preview_mode("quadra")
+        window._render_current()
+        window._open_image_list_window()
+        qapp.processEvents()
+        first_list = window.image_list_window
+        assert first_list is not None
+
+        first_list._swap_preview_roles("ref", "c")
+        qapp.processEvents()
+        expected = ("c", "a", "b", "ref")
+        assert window.state.preview_order == expected
+        assert main_physical_order() == expected
+        assert first_list.preview_order == expected
+
+        window._close_image_list_window()
+        qapp.processEvents()
+        window._open_image_list_window()
+        qapp.processEvents()
+        reopened = window.image_list_window
+        assert reopened is not None
+        assert reopened.preview_order == expected
+
+        window._close_image_list_window()
+        qapp.processEvents()
+        window.state.set_items({1: [item]}, mode="quadra", workbook_paths=paths)
+        window._apply_preview_mode("quadra")
+        assert window.state.preview_order == ("ref", "a", "b", "c")
+        assert main_physical_order() == ("ref", "a", "b", "c")
+    finally:
+        window._close_image_list_window()
+        qapp.processEvents()
+        window.close()
+        window.deleteLater()
+
+
+def test_main_comparison_uses_current_reordered_preview_layout(
+    qapp, tmp_path, monkeypatch
+):
+    captured = {}
+
+    class FakeViewer:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return main_window_module.SHOW_COMPARISON_RESULT
+
+    class FakeComparison:
+        def __init__(self, _item, _mode, _paths, _parent, **kwargs):
+            captured.update(kwargs)
+
+        def exec_maximized(self):
+            captured["maximized"] = True
+            return 0
+
+    monkeypatch.setattr(main_window_module, "ImageViewerDialog", FakeViewer)
+    monkeypatch.setattr(main_window_module, "ImageComparisonDialog", FakeComparison)
+    ref_path = _png(tmp_path / "ref-compare.png", (200, 20, 20))
+    a_path = _png(tmp_path / "a-compare.png", (20, 200, 20))
+    item = InspectionItem(
+        1,
+        1,
+        _extracted(ref_path, sheet_index=1, sheet_name="MAIN", cell="A1"),
+        _extracted(a_path, sheet_index=1, sheet_name="MAIN", cell="B1"),
+    )
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.state.set_items({1: [item]}, mode="double")
+        window.state.set_preview_order(("a", "ref"))
+        window._apply_preview_mode("double")
+        window._render_current()
+
+        window._enlarge("ref")
+
+        assert captured["role_order"] == ("a", "ref")
+        assert captured["maximized"] is True
     finally:
         window.close()
         window.deleteLater()

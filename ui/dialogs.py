@@ -5,8 +5,19 @@ from datetime import datetime
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image
-from PyQt6.QtCore import QSettings, QSignalBlocker, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtCore import (
+    QByteArray,
+    QEvent,
+    QMimeData,
+    QPoint,
+    QPointF,
+    QSettings,
+    QSignalBlocker,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
+from PyQt6.QtGui import QDrag, QKeySequence, QPixmap, QShortcut
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -14,6 +25,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QGridLayout,
     QHeaderView,
     QHBoxLayout,
     QLabel,
@@ -31,7 +43,16 @@ from PyQt6.QtWidgets import (
 
 from excel_jump import jump_target_for_list_cell, jump_target_for_side, jump_to_excel_cell
 from excel_manager import load_extracted_pil
-from models import SUPPORTED_MODES, ExtractedImage, InspectionItem, mode_label
+from models import (
+    MODE_ROLES,
+    ROLE_ORDER,
+    SUPPORTED_MODES,
+    ExtractedImage,
+    InspectionItem,
+    mode_label,
+    normalize_preview_order,
+    swapped_preview_order,
+)
 from review_annotations import (
     ROLE_DISPLAY_NAMES,
     ReviewAnnotationStore,
@@ -39,6 +60,313 @@ from review_annotations import (
 )
 from ui.helpers import pil_to_pixmap
 from ui.widgets import ClickableLabel
+
+
+SHOW_COMPARISON_RESULT = 2
+_PREVIEW_ROLE_MIME = "application/x-image-inspection-preview-role"
+
+
+class _DraggablePreviewTitle(QLabel):
+    """목록 미리보기의 의미 역할을 유지한 채 제목에서 드래그를 시작한다."""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self._drag_role = ""
+        self._drag_start: Optional[QPoint] = None
+
+    @property
+    def drag_role(self) -> str:
+        return self._drag_role
+
+    def enable_role_drag(self, role: str) -> None:
+        self._drag_role = str(role)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if (
+            self._drag_role
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._drag_start = event.position().toPoint()
+        else:
+            self._drag_start = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if (
+            not self._drag_role
+            or self._drag_start is None
+            or not (event.buttons() & Qt.MouseButton.LeftButton)
+        ):
+            super().mouseMoveEvent(event)
+            return
+        distance = (event.position().toPoint() - self._drag_start).manhattanLength()
+        if distance < QApplication.startDragDistance():
+            super().mouseMoveEvent(event)
+            return
+
+        mime = QMimeData()
+        mime.setData(_PREVIEW_ROLE_MIME, QByteArray(self._drag_role.encode("ascii")))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(self.grab())
+        drag.setHotSpot(event.position().toPoint())
+        self._drag_start = None
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        try:
+            drag.exec(Qt.DropAction.MoveAction, Qt.DropAction.MoveAction)
+        finally:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_start = None
+        super().mouseReleaseEvent(event)
+
+
+class _PreviewDropContainer(QWidget):
+    """같은 목록 창의 다른 역할 제목을 놓으면 두 표시 위치의 교환을 요청한다."""
+
+    preview_swap_requested = pyqtSignal(str, str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        # QWidget을 상속한 사용자 정의 컨테이너도 QSS의 배경·테두리를 직접 그린다.
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._drop_role = ""
+        self.setProperty("dragTarget", False)
+
+    @property
+    def drop_role(self) -> str:
+        return self._drop_role
+
+    def enable_role_drop(self, role: str) -> None:
+        self._drop_role = str(role)
+        self.setAcceptDrops(True)
+
+    def _source_role(self, event) -> Optional[str]:
+        if not self._drop_role or not event.mimeData().hasFormat(_PREVIEW_ROLE_MIME):
+            return None
+        source = event.source()
+        if (
+            not isinstance(source, _DraggablePreviewTitle)
+            or source.window() is not self.window()
+        ):
+            return None
+        try:
+            role = bytes(event.mimeData().data(_PREVIEW_ROLE_MIME)).decode("ascii")
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if (
+            role != source.drag_role
+            or role == self._drop_role
+            or role not in ROLE_ORDER
+        ):
+            return None
+        return role
+
+    def _set_drag_target(self, active: bool) -> None:
+        active = bool(active)
+        if self.property("dragTarget") == active:
+            return
+        self.setProperty("dragTarget", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def dragEnterEvent(self, event) -> None:
+        if self._source_role(event) is not None:
+            self._set_drag_target(True)
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._source_role(event) is not None:
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+        self._set_drag_target(False)
+        event.ignore()
+
+    def dragLeaveEvent(self, event) -> None:
+        self._set_drag_target(False)
+        event.accept()
+
+    def dropEvent(self, event) -> None:
+        source_role = self._source_role(event)
+        self._set_drag_target(False)
+        if source_role is None:
+            event.ignore()
+            return
+        self.preview_swap_requested.emit(source_role, self._drop_role)
+        event.setDropAction(Qt.DropAction.MoveAction)
+        event.accept()
+
+
+def swap_splitter_widgets(
+    first_splitter: QSplitter,
+    first_index: int,
+    first_widget: QWidget,
+    second_splitter: QSplitter,
+    second_index: int,
+    second_widget: QWidget,
+) -> None:
+    """같은/다른 splitter의 두 슬롯을 임시 자리로 안전하게 교환한다."""
+    first_hidden = first_widget.isHidden()
+    second_hidden = second_widget.isHidden()
+    placeholder = QWidget()
+    placeholder.setVisible(False)
+    first_splitter.replaceWidget(first_index, placeholder)
+    second_splitter.replaceWidget(second_index, first_widget)
+    first_splitter.replaceWidget(first_index, second_widget)
+    first_widget.setVisible(not first_hidden)
+    second_widget.setVisible(not second_hidden)
+    placeholder.deleteLater()
+
+
+class _ZoomScrollArea(QScrollArea):
+    """Ctrl+휠 확대와 Ctrl+좌클릭 드래그 이동을 제공한다."""
+
+    def __init__(
+        self,
+        zoom_callback: Callable[[float, QPointF], None],
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._zoom_callback = zoom_callback
+        self._control_pressed = False
+        self._panning = False
+        self._pan_start = QPoint()
+        self._pan_scroll_start = QPoint()
+        self.viewport().setMouseTracking(True)
+        self.viewport().installEventFilter(self)
+        application = QApplication.instance()
+        if application is not None:
+            application.installEventFilter(self)
+
+    def _set_control_pressed(self, pressed: bool) -> None:
+        self._control_pressed = bool(pressed)
+        if not self._control_pressed and self._panning:
+            self._panning = False
+        self._update_pan_cursor()
+
+    def _update_pan_cursor(self) -> None:
+        if self._panning:
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif self._control_pressed:
+            self.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.viewport().unsetCursor()
+
+    def _begin_pan(self, position: QPoint) -> None:
+        self._panning = True
+        self._pan_start = QPoint(position)
+        self._pan_scroll_start = QPoint(
+            self.horizontalScrollBar().value(),
+            self.verticalScrollBar().value(),
+        )
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        self._update_pan_cursor()
+
+    def _move_pan(self, position: QPoint) -> None:
+        delta = position - self._pan_start
+        self.horizontalScrollBar().setValue(
+            self._pan_scroll_start.x() - delta.x()
+        )
+        self.verticalScrollBar().setValue(
+            self._pan_scroll_start.y() - delta.y()
+        )
+
+    def _end_pan(self) -> None:
+        self._panning = False
+        self._update_pan_cursor()
+
+    def eventFilter(self, watched, event) -> bool:
+        event_type = event.type()
+        if (
+            event_type == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Control
+            and not event.isAutoRepeat()
+        ):
+            self._set_control_pressed(True)
+        elif (
+            event_type == QEvent.Type.KeyRelease
+            and event.key() == Qt.Key.Key_Control
+            and not event.isAutoRepeat()
+        ):
+            self._set_control_pressed(False)
+        elif event_type == QEvent.Type.ApplicationDeactivate:
+            self._set_control_pressed(False)
+
+        if watched is self.viewport():
+            if event_type == QEvent.Type.Enter:
+                self._set_control_pressed(
+                    bool(
+                        QApplication.keyboardModifiers()
+                        & Qt.KeyboardModifier.ControlModifier
+                    )
+                )
+            elif event_type == QEvent.Type.MouseButtonPress:
+                control_pressed = bool(
+                    event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                )
+                self._set_control_pressed(control_pressed)
+                if (
+                    event.button() == Qt.MouseButton.LeftButton
+                    and control_pressed
+                ):
+                    self._begin_pan(event.position().toPoint())
+                    event.accept()
+                    return True
+            elif event_type == QEvent.Type.MouseMove:
+                control_pressed = bool(
+                    event.modifiers() & Qt.KeyboardModifier.ControlModifier
+                )
+                self._set_control_pressed(control_pressed)
+                if self._panning and (
+                    event.buttons() & Qt.MouseButton.LeftButton
+                ):
+                    self._move_pan(event.position().toPoint())
+                    event.accept()
+                    return True
+                if self._panning:
+                    self._end_pan()
+            elif event_type == QEvent.Type.MouseButtonRelease:
+                if (
+                    event.button() == Qt.MouseButton.LeftButton
+                    and self._panning
+                ):
+                    self._end_pan()
+                    self._set_control_pressed(
+                        bool(
+                            event.modifiers()
+                            & Qt.KeyboardModifier.ControlModifier
+                        )
+                    )
+                    event.accept()
+                    return True
+            elif event_type in {
+                QEvent.Type.FocusOut,
+                QEvent.Type.Hide,
+            }:
+                self._set_control_pressed(False)
+
+        return super().eventFilter(watched, event)
+
+    def wheelEvent(self, event) -> None:
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta == 0:
+                delta = event.pixelDelta().y()
+            if delta != 0:
+                # 일반 마우스 휠 1칸(120)당 버튼과 같은 1.25배를 적용한다.
+                factor = 1.25 ** (delta / 120.0)
+                self._zoom_callback(factor, event.position())
+                event.accept()
+                return
+        super().wheelEvent(event)
 
 
 class ImageViewerDialog(QDialog):
@@ -52,6 +380,7 @@ class ImageViewerDialog(QDialog):
         *,
         jump_enabled: bool = False,
         jump_callback: Optional[Callable[[], None]] = None,
+        comparison_available: bool = False,
     ):
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -82,6 +411,16 @@ class ImageViewerDialog(QDialog):
         for button in (zoom_in, zoom_out, fit, actual, close_button):
             button.setObjectName("inputActionBtn")
             toolbar.addWidget(button)
+        self.comparison_button = QPushButton("다른파형 함께보기")
+        self.comparison_button.setObjectName("inputActionBtn")
+        self.comparison_button.setToolTip(
+            "현재 위치의 Ref/비교 파형을 한 화면에서 함께 봅니다."
+        )
+        self.comparison_button.setVisible(comparison_available)
+        self.comparison_button.clicked.connect(
+            lambda: self.done(SHOW_COMPARISON_RESULT)
+        )
+        toolbar.addWidget(self.comparison_button)
         toolbar.addStretch(1)
         self.jump_button = QPushButton("엑셀 파형 바로가기")
         self.jump_button.setObjectName("inputActionBtn")
@@ -94,9 +433,12 @@ class ImageViewerDialog(QDialog):
         toolbar.addWidget(self.jump_button)
         layout.addLayout(toolbar)
 
-        self._scroll = QScrollArea()
+        self._scroll = _ZoomScrollArea(self._zoom_at)
         self._scroll.setWidgetResizable(False)
         self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._scroll.setToolTip(
+            "Ctrl + 마우스 휠: 확대·축소 / Ctrl + 좌클릭 드래그: 이미지 이동"
+        )
         self._image_label = QLabel()
         self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._scroll.setWidget(self._image_label)
@@ -131,6 +473,33 @@ class ImageViewerDialog(QDialog):
         self._fit_mode = False
         self._apply_scale(self._scale * factor)
 
+    def _zoom_at(self, factor: float, viewport_position: QPointF) -> None:
+        """마우스 포인터 아래의 이미지 위치를 유지하며 확대·축소한다."""
+        old_width = self._image_label.width()
+        old_height = self._image_label.height()
+        if old_width <= 0 or old_height <= 0:
+            self._zoom_by(factor)
+            return
+
+        image_x = viewport_position.x() - self._image_label.x()
+        image_y = viewport_position.y() - self._image_label.y()
+        pointer_over_image = (
+            0 <= image_x <= old_width and 0 <= image_y <= old_height
+        )
+        self._zoom_by(factor)
+        if not pointer_over_image:
+            return
+
+        new_width = self._image_label.width()
+        new_height = self._image_label.height()
+        viewport = self._scroll.viewport()
+        if new_width > viewport.width():
+            target_x = image_x * new_width / old_width - viewport_position.x()
+            self._scroll.horizontalScrollBar().setValue(round(target_x))
+        if new_height > viewport.height():
+            target_y = image_y * new_height / old_height - viewport_position.y()
+            self._scroll.verticalScrollBar().setValue(round(target_y))
+
     def _show_actual_size(self) -> None:
         self._fit_mode = False
         self._apply_scale(1.0)
@@ -159,17 +528,488 @@ class ImageViewerDialog(QDialog):
             QTimer.singleShot(0, self._fit_to_window)
 
 
+class _ComparisonImagePane(QWidget):
+    """다중 비교창에서 한 역할의 파형과 정규화된 뷰 위치를 관리한다."""
+
+    def __init__(
+        self,
+        role: str,
+        extracted: Optional[ExtractedImage],
+        workbook_path: str,
+        *,
+        jump_callback: Optional[Callable[[], None]] = None,
+        zoom_request_callback: Optional[
+            Callable[[str, float, QPointF], None]
+        ] = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.role = role
+        self._zoom_request_callback = zoom_request_callback
+        self._base_pixmap = QPixmap()
+        self._scale = 1.0
+        self._fit_mode = True
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(3, 3, 3, 3)
+        layout.setSpacing(4)
+        header = QHBoxLayout()
+        title = QLabel(ROLE_DISPLAY_NAMES.get(role, role.upper()))
+        title.setObjectName("previewTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(title, stretch=1)
+        self.jump_button = QPushButton("엑셀 파형 바로가기")
+        self.jump_button.setObjectName("inputActionBtn")
+        self.jump_button.setEnabled(jump_callback is not None)
+        if jump_callback is not None:
+            self.jump_button.clicked.connect(jump_callback)
+        header.addWidget(self.jump_button)
+        layout.addLayout(header)
+
+        filename = os.path.basename(workbook_path) if workbook_path else "-"
+        location = extracted.location_text if extracted is not None else "이미지 없음"
+        self.metadata = QLabel(f"{filename} · {location}")
+        self.metadata.setObjectName("imageMeta")
+        self.metadata.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.metadata.setWordWrap(True)
+        layout.addWidget(self.metadata)
+
+        self._scroll = _ZoomScrollArea(self._zoom_at)
+        self._scroll.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._scroll.setToolTip(
+            "Ctrl + 마우스 휠: 모든 파형 확대·축소 / "
+            "Ctrl + 좌클릭 드래그: 모든 파형 이동"
+        )
+        self._image_label = QLabel()
+        self._image_label.setObjectName("previewPane")
+        self._image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._scroll.setWidget(self._image_label)
+        layout.addWidget(self._scroll, stretch=1)
+
+        image = load_extracted_pil(extracted)
+        if image is None:
+            self._scroll.setWidgetResizable(True)
+            self._image_label.setText(self._placeholder_text(extracted))
+        else:
+            self._scroll.setWidgetResizable(False)
+            self._base_pixmap = pil_to_pixmap(
+                image,
+                max_w=max(1, image.width),
+                max_h=max(1, image.height),
+                upscale=False,
+            )
+            self._apply_scale(1.0)
+            QTimer.singleShot(0, self.fit_to_window)
+
+    @staticmethod
+    def _placeholder_text(extracted: Optional[ExtractedImage]) -> str:
+        if extracted is None:
+            return "이미지 없음"
+        if extracted.placeholder_text == "시트 없음":
+            return "현재 Excel에는 이 시트가 없습니다."
+        if extracted.cell_address == "-":
+            return "이 시트에는 이미지가 없습니다."
+        if extracted.is_null:
+            return "해당 위치에 이미지가 없습니다."
+        return "이미지를 불러올 수 없습니다."
+
+    @property
+    def has_image(self) -> bool:
+        return not self._base_pixmap.isNull()
+
+    def _apply_scale(self, scale: float) -> None:
+        if not self.has_image:
+            return
+        self._scale = max(0.01, min(8.0, float(scale)))
+        width = max(1, int(self._base_pixmap.width() * self._scale))
+        height = max(1, int(self._base_pixmap.height() * self._scale))
+        scaled = self._base_pixmap.scaled(
+            width,
+            height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._image_label.setPixmap(scaled)
+        self._image_label.resize(scaled.size())
+
+    def zoom_by(self, factor: float) -> None:
+        if not self.has_image:
+            return
+        self._fit_mode = False
+        self._apply_scale(self._scale * factor)
+
+    def _zoom_at(self, factor: float, viewport_position: QPointF) -> None:
+        if not self.has_image:
+            return
+        if self._zoom_request_callback is not None:
+            self._zoom_request_callback(self.role, factor, viewport_position)
+            return
+
+        image_anchor, viewport_anchor = self.zoom_anchors(viewport_position)
+        self.zoom_at_normalized(factor, image_anchor, viewport_anchor)
+
+    def zoom_anchors(
+        self, viewport_position: QPointF
+    ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """포인터가 가리키는 이미지/viewport 위치를 0~1 비율로 반환한다."""
+        if not self.has_image:
+            return (0.5, 0.5), (0.5, 0.5)
+        width = self._image_label.width()
+        height = self._image_label.height()
+        viewport = self._scroll.viewport()
+        if width <= 0 or height <= 0:
+            return self.normalized_view_center(), (0.5, 0.5)
+
+        image_x = viewport_position.x() - self._image_label.x()
+        image_y = viewport_position.y() - self._image_label.y()
+        if not (0 <= image_x <= width and 0 <= image_y <= height):
+            return self.normalized_view_center(), (0.5, 0.5)
+        viewport_width = max(1, viewport.width())
+        viewport_height = max(1, viewport.height())
+        return (
+            image_x / width,
+            image_y / height,
+        ), (
+            max(0.0, min(1.0, viewport_position.x() / viewport_width)),
+            max(0.0, min(1.0, viewport_position.y() / viewport_height)),
+        )
+
+    def zoom_at_normalized(
+        self,
+        factor: float,
+        image_anchor: Tuple[float, float],
+        viewport_anchor: Tuple[float, float],
+    ) -> None:
+        """정규화된 이미지 지점을 같은 viewport 지점에 유지하며 확대한다."""
+        if not self.has_image:
+            return
+        self.zoom_by(factor)
+        self.set_normalized_view_anchor(image_anchor, viewport_anchor)
+
+    def normalized_axis_center(self, axis: str) -> float:
+        if not self.has_image:
+            return 0.5
+        viewport = self._scroll.viewport()
+        if axis == "x":
+            image_size = self._image_label.width()
+            viewport_size = viewport.width()
+            image_start = self._image_label.x()
+        else:
+            image_size = self._image_label.height()
+            viewport_size = viewport.height()
+            image_start = self._image_label.y()
+        if image_size <= 0:
+            return 0.5
+        image_center = viewport_size / 2.0 - image_start
+        return max(0.0, min(1.0, image_center / image_size))
+
+    def normalized_view_center(self) -> Tuple[float, float]:
+        return (
+            self.normalized_axis_center("x"),
+            self.normalized_axis_center("y"),
+        )
+
+    def set_normalized_axis_center(self, axis: str, value: float) -> None:
+        if not self.has_image:
+            return
+        normalized = max(0.0, min(1.0, float(value)))
+        viewport = self._scroll.viewport()
+        if axis == "x":
+            image_size = self._image_label.width()
+            viewport_size = viewport.width()
+            scrollbar = self._scroll.horizontalScrollBar()
+        else:
+            image_size = self._image_label.height()
+            viewport_size = viewport.height()
+            scrollbar = self._scroll.verticalScrollBar()
+        scrollbar.setValue(round(normalized * image_size - viewport_size / 2.0))
+
+    def set_normalized_view_anchor(
+        self,
+        image_anchor: Tuple[float, float],
+        viewport_anchor: Tuple[float, float],
+    ) -> None:
+        if not self.has_image:
+            return
+        viewport = self._scroll.viewport()
+        horizontal = self._scroll.horizontalScrollBar()
+        vertical = self._scroll.verticalScrollBar()
+        horizontal.setValue(
+            round(
+                max(0.0, min(1.0, image_anchor[0]))
+                * self._image_label.width()
+                - max(0.0, min(1.0, viewport_anchor[0]))
+                * viewport.width()
+            )
+        )
+        vertical.setValue(
+            round(
+                max(0.0, min(1.0, image_anchor[1]))
+                * self._image_label.height()
+                - max(0.0, min(1.0, viewport_anchor[1]))
+                * viewport.height()
+            )
+        )
+
+    def show_actual_size(self) -> None:
+        if not self.has_image:
+            return
+        self._fit_mode = False
+        self._apply_scale(1.0)
+
+    def fit_to_window(self) -> None:
+        if not self.has_image:
+            return
+        width = self._scroll.viewport().width() - 4
+        height = self._scroll.viewport().height() - 4
+        if width <= 0 or height <= 0:
+            return
+        self._fit_mode = True
+        self._apply_scale(
+            min(
+                width / self._base_pixmap.width(),
+                height / self._base_pixmap.height(),
+            )
+        )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._fit_mode and self.has_image:
+            QTimer.singleShot(0, self.fit_to_window)
+
+
+class ImageComparisonDialog(QDialog):
+    """현재 위치의 모든 파형을 동기화된 확대·이동 상태로 표시한다."""
+
+    def __init__(
+        self,
+        item: InspectionItem,
+        mode: str,
+        workbook_paths: Dict[str, str],
+        parent=None,
+        *,
+        jump_callback: Optional[Callable[[str], None]] = None,
+        jump_enabled_sides: Sequence[str] = (),
+        role_order: Optional[Sequence[str]] = None,
+    ) -> None:
+        super().__init__(parent)
+        if mode not in MODE_ROLES:
+            raise ValueError(f"지원하지 않는 검사 모드: {mode}")
+        self._mode = mode
+        self._item = item
+        self.role_order = normalize_preview_order(mode, role_order)
+        self._syncing_view = False
+        self.panes: Dict[str, _ComparisonImagePane] = {}
+        self.pane_positions: Dict[str, Tuple[int, int]] = {}
+        self.setWindowTitle(
+            f"다른파형 함께보기 · {mode_label(mode)} · "
+            f"{item.sheet_name} · {item.cell_address}"
+        )
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        self.resize(1500, 900)
+        self.setMinimumSize(900, 600)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+        toolbar = QHBoxLayout()
+        heading = QLabel(
+            f"{mode_label(mode)} · {item.sheet_name} · {item.cell_address}"
+        )
+        heading.setObjectName("positionLabel")
+        toolbar.addWidget(heading)
+        hint = QLabel(
+            "어느 파형에서든 Ctrl+휠: 전체 확대/축소 · "
+            "스크롤/Ctrl+드래그: 전체 이동"
+        )
+        hint.setObjectName("keyboardHint")
+        toolbar.addWidget(hint)
+        toolbar.addStretch(1)
+        zoom_in = QPushButton("전체 확대 +")
+        zoom_out = QPushButton("전체 축소 −")
+        fit = QPushButton("전체 창에 맞춤")
+        actual = QPushButton("전체 실제 크기")
+        close_button = QPushButton("닫기")
+        zoom_in.clicked.connect(lambda: self._zoom_all(1.25))
+        zoom_out.clicked.connect(lambda: self._zoom_all(1.0 / 1.25))
+        fit.clicked.connect(self._fit_all)
+        actual.clicked.connect(self._show_all_actual_size)
+        close_button.clicked.connect(self.accept)
+        for button in (zoom_in, zoom_out, fit, actual, close_button):
+            button.setObjectName("inputActionBtn")
+            toolbar.addWidget(button)
+        root.addLayout(toolbar)
+
+        self._grid = QGridLayout()
+        self._grid.setContentsMargins(0, 0, 0, 0)
+        self._grid.setHorizontalSpacing(6)
+        self._grid.setVerticalSpacing(6)
+        root.addLayout(self._grid, stretch=1)
+
+        extracted_by_role = dict(item.side_images())
+        enabled_sides = set(jump_enabled_sides)
+        roles = self.role_order
+        positions = (
+            ((0, 0), (0, 1), (1, 0), (1, 1))
+            if mode == "quadra"
+            else tuple((0, index) for index in range(len(roles)))
+        )
+        for role, (row, column) in zip(roles, positions):
+            pane_jump = None
+            if jump_callback is not None and role in enabled_sides:
+                pane_jump = lambda owned_role=role: jump_callback(owned_role)
+            pane = _ComparisonImagePane(
+                role,
+                extracted_by_role.get(role),
+                workbook_paths.get(role, ""),
+                jump_callback=pane_jump,
+                zoom_request_callback=self._on_pane_zoom_requested,
+                parent=self,
+            )
+            self.panes[role] = pane
+            self.pane_positions[role] = (row, column)
+            self._grid.addWidget(pane, row, column)
+            pane._scroll.horizontalScrollBar().valueChanged.connect(
+                lambda _value, owned_role=role: self._sync_scroll_from(
+                    owned_role, "x"
+                )
+            )
+            pane._scroll.verticalScrollBar().valueChanged.connect(
+                lambda _value, owned_role=role: self._sync_scroll_from(
+                    owned_role, "y"
+                )
+            )
+
+        row_count = 2 if mode == "quadra" else 1
+        column_count = 2 if mode == "quadra" else len(roles)
+        for row in range(row_count):
+            self._grid.setRowStretch(row, 1)
+        for column in range(column_count):
+            self._grid.setColumnStretch(column, 1)
+
+        QShortcut(QKeySequence("+"), self, activated=lambda: self._zoom_all(1.25))
+        QShortcut(QKeySequence("-"), self, activated=lambda: self._zoom_all(0.8))
+        QShortcut(QKeySequence("0"), self, activated=self._fit_all)
+
+    def _image_panes(self) -> List[_ComparisonImagePane]:
+        return [pane for pane in self.panes.values() if pane.has_image]
+
+    def _shared_view_center(self) -> Tuple[float, float]:
+        panes = self._image_panes()
+        return panes[0].normalized_view_center() if panes else (0.5, 0.5)
+
+    def _effective_zoom_factor(self, requested_factor: float) -> float:
+        """모든 파형이 같은 배율만큼 움직이도록 공통 한계를 적용한다."""
+        panes = self._image_panes()
+        factor = float(requested_factor)
+        if not panes or factor == 1.0:
+            return 1.0
+        if factor > 1.0:
+            return max(
+                1.0,
+                min(factor, *(8.0 / pane._scale for pane in panes)),
+            )
+        return min(
+            1.0,
+            max(factor, *(0.01 / pane._scale for pane in panes)),
+        )
+
+    def _on_pane_zoom_requested(
+        self,
+        role: str,
+        factor: float,
+        viewport_position: QPointF,
+    ) -> None:
+        pane = self.panes.get(role)
+        if pane is None or not pane.has_image:
+            return
+        image_anchor, viewport_anchor = pane.zoom_anchors(viewport_position)
+        self._zoom_all(
+            factor,
+            image_anchor=image_anchor,
+            viewport_anchor=viewport_anchor,
+        )
+
+    def _zoom_all(
+        self,
+        factor: float,
+        *,
+        image_anchor: Optional[Tuple[float, float]] = None,
+        viewport_anchor: Tuple[float, float] = (0.5, 0.5),
+    ) -> None:
+        panes = self._image_panes()
+        if not panes:
+            return
+        if image_anchor is None:
+            image_anchor = self._shared_view_center()
+        effective_factor = self._effective_zoom_factor(factor)
+        self._syncing_view = True
+        try:
+            for pane in panes:
+                pane.zoom_at_normalized(
+                    effective_factor,
+                    image_anchor,
+                    viewport_anchor,
+                )
+        finally:
+            self._syncing_view = False
+
+    def _sync_scroll_from(self, source_role: str, axis: str) -> None:
+        if self._syncing_view:
+            return
+        source = self.panes.get(source_role)
+        if source is None or not source.has_image:
+            return
+        normalized_center = source.normalized_axis_center(axis)
+        self._syncing_view = True
+        try:
+            for role, pane in self.panes.items():
+                if role != source_role and pane.has_image:
+                    pane.set_normalized_axis_center(axis, normalized_center)
+        finally:
+            self._syncing_view = False
+
+    def _fit_all(self) -> None:
+        self._syncing_view = True
+        try:
+            for pane in self.panes.values():
+                pane.fit_to_window()
+        finally:
+            self._syncing_view = False
+
+    def _show_all_actual_size(self) -> None:
+        view_center = self._shared_view_center()
+        self._syncing_view = True
+        try:
+            for pane in self.panes.values():
+                pane.show_actual_size()
+                pane.set_normalized_view_anchor(view_center, (0.5, 0.5))
+        finally:
+            self._syncing_view = False
+
+    def exec_maximized(self) -> int:
+        self.showMaximized()
+        return self.exec()
+
+
 def create_preview_pane(
     default_title: str,
 ) -> Tuple[QWidget, QLabel, QLabel, ClickableLabel, QPushButton]:
     """셀 주소 옆에 엑셀 바로가기 버튼이 있는 미리보기 칸을 만든다."""
-    container = QWidget()
+    container = _PreviewDropContainer()
     container.setMinimumWidth(0)
     container.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
     layout = QVBoxLayout(container)
     layout.setContentsMargins(2, 2, 2, 2)
     layout.setSpacing(4)
-    title = QLabel(default_title)
+    title = _DraggablePreviewTitle(default_title)
     title.setObjectName("previewTitle")
     title.setAlignment(Qt.AlignmentFlag.AlignCenter)
     title.setWordWrap(True)
@@ -382,8 +1222,9 @@ USAGE_HELP_TEXT = """OSC 파형 수동 비교기 사용 방법
 2. Excel 파일 지정
 지원 파일은 .xlsx, .xlsm 입니다.
 각 칸에 경로를 입력하거나, 파일을 끌어다 놓거나, [파일 선택]으로 지정합니다.
+[경로 reset]은 해당 칸의 현재·저장 경로를 지우고, 다음 [파일 선택]을 D:\에서 시작합니다.
 • Excel Ref: 기준 파일
-• Excel 비교A / 비교B / 비교C: 나란히 볼 비교 파일
+• Excel A / Excel B / Excel C: 나란히 볼 비교 파일
 시트 수나 탭 순서가 달라도 사용할 수 있습니다. 프로그램은 시트 이름으로 연결합니다.
 메뉴 [파일] → [Ref Excel 선택...] (Ctrl+O)으로 Ref 파일만 고를 수도 있습니다.
 
@@ -431,6 +1272,8 @@ Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 원본 
 • 위: 전체 / 시트 / No. / Ref 셀 / 비교A 셀 (Triple이면 비교B 셀, Quadra이면 비교C 셀까지)
 • 아래: 선택한 행의 이미지. Double·Triple은 가로로, Quadra는 Ref|A / B|C 2×2
 • 미리보기: 시트명·셀주소는 가운데, [엑셀 파형 바로가기]는 오른쪽 끝
+• Excel 이름 제목을 다른 이미지 칸으로 드래그하면 두 칸의 표시 위치가 서로 바뀝니다.
+• 바꾼 순서는 행·시트를 이동하거나 리스트를 다시 열어도 유지되며, 새 Excel 묶음을 불러오면 기본 순서로 돌아갑니다.
 • 한 번 클릭 또는 ↑/↓: 미리보기만 바뀝니다. Excel은 열리지 않습니다.
 • 상단 [시트 선택]: 전체 시트 또는 특정 시트만 목록에 표시
 제목 표시줄을 더블클릭하면 최대화할 수 있습니다.
@@ -446,6 +1289,7 @@ Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 원본 
   - 확대 팝업 오른쪽 위의 [엑셀 파형 바로가기]
   - 전체, 시트, No. 칸을 더블클릭해도 Excel은 열리지 않습니다.
   - '시트 없음'과 '이미지 없음'은 열지 않습니다.
+  - 이동한 셀은 선택 상태로 유지하며 위쪽 7개 행을 함께 표시합니다.
   - 이미 Excel이 열려 있으면 새 창을 또 열지 않고, 그 창에서 해당 파일·칸으로 이동합니다.
   - 두 번째 이후에도 Excel 창이 맨 앞으로 올라옵니다.
 목록을 넘기는 속도는 하이퍼링크를 켜도 거의 같습니다. Excel은 더블클릭하거나 바로가기 버튼을 누른 순간에만 엽니다.
@@ -454,10 +1298,16 @@ Queue 생성 뒤 Sheet 역할 관계와 Source Image ID를 검사하며, 원본 
 8. 이미지 확대
 메인 화면이나 리스트 창에서 미리보기 이미지를 클릭하면 확대 창이 열립니다.
 • [확대 +] / [축소 −] 또는 + / − 키
+• Ctrl + 마우스 휠로 포인터 위치를 중심으로 확대/축소
+• Ctrl + 좌클릭 드래그로 확대된 이미지 이동
 • [창에 맞춤] 또는 0 키
 • [실제 크기]
+• [다른파형 함께보기]: 현재 위치의 Ref/비교A/비교B/비교C를 모드에 맞춰 최대화 창으로 표시
+  - 리스트에서 순서를 바꿨다면 함께보기와 메인 미리보기도 같은 배열을 사용합니다.
 • 오른쪽 위 [엑셀 파형 바로가기]: 하이퍼링크 모드가 켜져 있으면 그 이미지의 Excel 칸으로 이동합니다.
 창 크기를 바꾸면 맞춤 모드일 때 이미지도 다시 맞춰집니다.
+함께보기 창은 제목 표시줄을 더블클릭해 최대화하거나 원래 크기로 복원할 수 있습니다.
+함께보기 창에서는 어느 파형에서 확대·축소하거나 스크롤바·일반 휠·Ctrl 드래그로 이동해도 모든 파형이 같은 비율 위치로 함께 움직입니다.
 
 
 9. 참고
@@ -540,6 +1390,7 @@ class ImageListWindow(QDialog):
 
     excel_jump_failed = pyqtSignal(str)
     hyperlink_mode_changed = pyqtSignal(bool)
+    preview_order_changed = pyqtSignal(object)
     _INDEX_COLUMN_WIDTH = 58
     _NO_COLUMN_WIDTH = 72
     _CELL_COLUMN_WIDTH = 92
@@ -552,6 +1403,7 @@ class ImageListWindow(QDialog):
         *,
         initial_index: int = 0,
         annotation_store: Optional[ReviewAnnotationStore] = None,
+        preview_order: Optional[Sequence[str]] = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -563,6 +1415,8 @@ class ImageListWindow(QDialog):
             id(item): index for index, item in enumerate(self._all_items)
         }
         self._mode = mode
+        self._preview_order = normalize_preview_order(mode, preview_order)
+        self._layout_order = list(ROLE_ORDER)
         self._workbook_paths = dict(workbook_paths)
         self.annotation_store = annotation_store or ReviewAnnotationStore(
             self._workbook_paths,
@@ -682,7 +1536,8 @@ class ImageListWindow(QDialog):
         preview_layout.setContentsMargins(0, 4, 0, 0)
         preview_layout.setSpacing(5)
         preview_hint = QLabel(
-            "목록에서 ↑/↓ 키 또는 마우스로 이동하면 이미지가 함께 바뀝니다."
+            "목록에서 ↑/↓ 키 또는 마우스로 이동하면 이미지가 함께 바뀝니다. · "
+            "Excel 이름을 다른 이미지 칸으로 드래그하면 두 칸의 위치가 바뀝니다."
         )
         preview_hint.setObjectName("keyboardHint")
         preview_layout.addWidget(preview_hint)
@@ -723,6 +1578,28 @@ class ImageListWindow(QDialog):
             self.c_memo_button,
             self.c_jump_button,
         ) = self._create_preview_pane("Excel 비교C")
+        self._preview_containers = {
+            "ref": self.ref_container,
+            "a": self.a_container,
+            "b": self.b_container,
+            "c": self.c_container,
+        }
+        self._preview_titles = {
+            "ref": self.ref_title,
+            "a": self.a_title,
+            "b": self.b_title,
+            "c": self.c_title,
+        }
+        for role in MODE_ROLES[mode]:
+            title_widget = self._preview_titles[role]
+            container_widget = self._preview_containers[role]
+            if isinstance(title_widget, _DraggablePreviewTitle):
+                title_widget.enable_role_drag(role)
+            if isinstance(container_widget, _PreviewDropContainer):
+                container_widget.enable_role_drop(role)
+                container_widget.preview_swap_requested.connect(
+                    self._swap_preview_roles
+                )
         self.ref_image.clicked.connect(lambda: self._enlarge("ref"))
         self.a_image.clicked.connect(lambda: self._enlarge("a"))
         self.b_image.clicked.connect(lambda: self._enlarge("b"))
@@ -787,6 +1664,7 @@ class ImageListWindow(QDialog):
             for handle_index in (1, 2, 3):
                 self.preview_splitter.handle(handle_index).setEnabled(False)
             preview_layout.addWidget(self.preview_splitter, stretch=1)
+        self._apply_preview_order(self._preview_order)
         self.content_splitter.addWidget(self.preview_widget)
         self.content_splitter.setStretchFactor(0, 0)
         self.content_splitter.setStretchFactor(1, 1)
@@ -820,6 +1698,76 @@ class ImageListWindow(QDialog):
         QPushButton,
     ]:
         return create_review_preview_pane(default_title)
+
+    @property
+    def preview_order(self) -> Tuple[str, ...]:
+        return self._preview_order
+
+    def _preview_slot(self, index: int) -> Tuple[QSplitter, int]:
+        if self._mode == "quadra":
+            if index < 2:
+                return self.quadra_top, index
+            return self.quadra_bottom, index - 2
+        return self.preview_splitter, index
+
+    def _apply_preview_order(self, role_order: Sequence[str]) -> None:
+        normalized = normalize_preview_order(self._mode, role_order)
+        desired_layout = list(normalized) + [
+            role for role in ROLE_ORDER if role not in normalized
+        ]
+        for target_index, target_role in enumerate(desired_layout):
+            current_index = self._layout_order.index(target_role)
+            if current_index == target_index:
+                continue
+            current_role = self._layout_order[target_index]
+            target_splitter, target_slot = self._preview_slot(target_index)
+            current_splitter, current_slot = self._preview_slot(current_index)
+            swap_splitter_widgets(
+                target_splitter,
+                target_slot,
+                self._preview_containers[current_role],
+                current_splitter,
+                current_slot,
+                self._preview_containers[target_role],
+            )
+            self._layout_order[target_index], self._layout_order[current_index] = (
+                self._layout_order[current_index],
+                self._layout_order[target_index],
+            )
+        self._preview_order = normalized
+        if self._mode == "quadra":
+            self.quadra_top.handle(1).setEnabled(False)
+            self.quadra_bottom.handle(1).setEnabled(False)
+        else:
+            for handle_index in range(1, self.preview_splitter.count()):
+                self.preview_splitter.handle(handle_index).setEnabled(False)
+        self._equalize_preview_panes()
+
+    def set_preview_order(
+        self,
+        role_order: Sequence[str],
+        *,
+        emit: bool = False,
+    ) -> bool:
+        normalized = normalize_preview_order(self._mode, role_order)
+        if normalized == self._preview_order:
+            return False
+        self._apply_preview_order(normalized)
+        if emit:
+            self.preview_order_changed.emit(self._preview_order)
+        return True
+
+    def _swap_preview_roles(self, source_role: str, target_role: str) -> None:
+        swapped = swapped_preview_order(
+            self._mode,
+            self._preview_order,
+            source_role,
+            target_role,
+        )
+        if swapped == self._preview_order:
+            return
+        self._apply_preview_order(swapped)
+        self.preview_order_changed.emit(self._preview_order)
 
     @staticmethod
     def _cell_text(extracted: Optional[ExtractedImage]) -> str:
@@ -1412,6 +2360,10 @@ class ImageListWindow(QDialog):
         title: str,
     ) -> None:
         title_label.setText(title)
+        if isinstance(title_label, _DraggablePreviewTitle) and title_label.drag_role:
+            title_label.setToolTip(
+                f"{title}\n다른 이미지 칸으로 드래그하면 두 칸의 위치가 바뀝니다."
+            )
         meta_label.setText("-")
         image_label.setPixmap(None)
         image_label.setText("이미지 없음")
@@ -1427,7 +2379,10 @@ class ImageListWindow(QDialog):
     ) -> None:
         filename = os.path.basename(path) if path else "-"
         title_label.setText(f"{role} · {filename}")
-        title_label.setToolTip(f"{role} · {filename}")
+        title_tooltip = f"{role} · {filename}"
+        if isinstance(title_label, _DraggablePreviewTitle) and title_label.drag_role:
+            title_tooltip += "\n다른 이미지 칸으로 드래그하면 두 칸의 위치가 바뀝니다."
+        title_label.setToolTip(title_tooltip)
         meta_label.setText(extracted.location_text)
         meta_label.setToolTip(extracted.location_text)
         if extracted.is_null:
@@ -1463,14 +2418,33 @@ class ImageListWindow(QDialog):
         if image is None:
             return
         role = {"ref": "Ref", "a": "비교A", "b": "비교B", "c": "비교C"}[side]
-        ImageViewerDialog(
+        viewer = ImageViewerDialog(
             image,
             f"{role} · {extracted.location_text}",
             self,
             jump_enabled=self.hyperlink_check.isChecked()
             and self._preview_jump_available(side),
             jump_callback=lambda: self._jump_from_preview(side),
-        ).exec()
+            comparison_available=True,
+        )
+        result = viewer.exec()
+        if result == SHOW_COMPARISON_RESULT and not self._closing:
+            enabled_sides = tuple(
+                owned_side
+                for owned_side in MODE_ROLES[self._mode]
+                if self.hyperlink_check.isChecked()
+                and self._preview_jump_available(owned_side)
+            )
+            comparison = ImageComparisonDialog(
+                item,
+                self._mode,
+                self._workbook_paths,
+                self,
+                jump_callback=self._jump_from_preview,
+                jump_enabled_sides=enabled_sides,
+                role_order=self._preview_order,
+            )
+            comparison.exec_maximized()
         try:
             if not self._closing:
                 self.table.setFocus(Qt.FocusReason.OtherFocusReason)

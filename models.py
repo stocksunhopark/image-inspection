@@ -1,12 +1,17 @@
 """Excel 이미지 육안 검사기가 공유하는 순수 데이터 모델."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 from PIL import Image
 
 SUPPORTED_MODES = frozenset({"double", "triple", "quadra"})
 ROLE_ORDER = ("ref", "a", "b", "c")
+MODE_ROLES = {
+    "double": ("ref", "a"),
+    "triple": ("ref", "a", "b"),
+    "quadra": ROLE_ORDER,
+}
 ROLE_LABELS = {"ref": "REF", "a": "A", "b": "B", "c": "C"}
 MISSING_SHEET = "sheet_missing"
 MISSING_IMAGE = "image_missing"
@@ -19,6 +24,44 @@ MODE_LABELS = {
 
 def mode_label(mode: str) -> str:
     return MODE_LABELS.get(mode, mode)
+
+
+def normalize_preview_order(
+    mode: str,
+    role_order: Optional[Iterable[str]] = None,
+) -> Tuple[str, ...]:
+    """모드에 필요한 역할을 중복 없이 빠짐없는 표시 순서로 정규화한다."""
+    if mode not in SUPPORTED_MODES:
+        raise ValueError(f"지원하지 않는 검사 모드: {mode}")
+    available = MODE_ROLES[mode]
+    requested = tuple(role_order or ())
+    ordered = tuple(
+        role
+        for index, role in enumerate(requested)
+        if role in available and role not in requested[:index]
+    )
+    return ordered + tuple(role for role in available if role not in ordered)
+
+
+def swapped_preview_order(
+    mode: str,
+    role_order: Iterable[str],
+    source_role: str,
+    target_role: str,
+) -> Tuple[str, ...]:
+    """표시 역할 두 개의 위치만 교환하고 의미상의 역할은 유지한다."""
+    normalized = list(normalize_preview_order(mode, role_order))
+    if source_role == target_role:
+        return tuple(normalized)
+    if source_role not in normalized or target_role not in normalized:
+        return tuple(normalized)
+    source_index = normalized.index(source_role)
+    target_index = normalized.index(target_role)
+    normalized[source_index], normalized[target_index] = (
+        normalized[target_index],
+        normalized[source_index],
+    )
+    return tuple(normalized)
 
 
 @dataclass

@@ -19,6 +19,7 @@ ErrorCallback = Callable[[str], None]
 _CELL_COLUMN_TO_SIDE = {3: "ref", 4: "a", 5: "b", 6: "c"}
 _SIDE_TO_COLUMN = {"ref": 3, "a": 4, "b": 5, "c": 6}
 _CELL_PATTERN = re.compile(r"^[A-Z]{1,3}\d{1,7}$", re.IGNORECASE)
+_VISIBLE_CONTEXT_ROWS = 7
 
 
 def side_for_list_column(column: int) -> Optional[str]:
@@ -120,9 +121,32 @@ def _jump_with_win32com(path: str, sheet_name: str, cell_address: str) -> bool:
     worksheet = workbook.Worksheets(sheet_name)
     workbook.Activate()
     worksheet.Activate()
-    excel.Goto(worksheet.Range(cell_address), True)
+    target_cell = worksheet.Range(cell_address)
+    excel.Goto(target_cell, True)
+    _scroll_target_with_context(excel, target_cell)
     _bring_excel_to_front(excel, workbook)
     return True
+
+
+def _scroll_target_with_context(excel, target_cell) -> None:
+    """선택 셀 위쪽 행을 함께 보이되 Excel 이동 실패로 이어지지 않게 한다."""
+    try:
+        scroll_row = max(1, int(target_cell.Row) - _VISIBLE_CONTEXT_ROWS)
+        window = excel.ActiveWindow
+    except Exception:
+        return
+
+    # 틀 고정/분할 창에서는 실제로 스크롤되는 활성 Pane을 우선한다.
+    try:
+        window.ActivePane.ScrollRow = scroll_row
+        return
+    except Exception:
+        pass
+    try:
+        window.ScrollRow = scroll_row
+    except Exception:
+        # 화면 여백 조정이 지원되지 않아도 대상 셀 선택은 그대로 유지한다.
+        pass
 
 
 def _find_open_workbook(excel, path: str):
@@ -279,7 +303,16 @@ if (-not $workbook) {{
 $worksheet = $workbook.Worksheets.Item($sheet)
 $workbook.Activate()
 $worksheet.Activate()
-$excel.Goto($worksheet.Range($cell), $true)
+$targetCell = $worksheet.Range($cell)
+$excel.Goto($targetCell, $true)
+try {{
+  $scrollRow = [Math]::Max(1, [int]$targetCell.Row - {_VISIBLE_CONTEXT_ROWS})
+  try {{
+    $excel.ActiveWindow.ActivePane.ScrollRow = $scrollRow
+  }} catch {{
+    $excel.ActiveWindow.ScrollRow = $scrollRow
+  }}
+}} catch {{}}
 try {{ $excel.Activate() }} catch {{}}
 $hwnd = $null
 try {{ $hwnd = $workbook.Windows.Item(1).Hwnd }} catch {{}}

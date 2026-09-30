@@ -136,6 +136,18 @@ QPushButton:disabled {
     border-color: #334155;
     color: #94a3b8;
 }
+QPushButton#pathResetButton {
+    background-color: #334155;
+    border-color: #475569;
+    color: #e2e8f0;
+}
+QPushButton#pathResetButton:hover { background-color: #475569; }
+QPushButton#pathResetButton:pressed { background-color: #1e293b; }
+QPushButton#pathResetButton:disabled {
+    background-color: #273449;
+    border-color: #334155;
+    color: #64748b;
+}
 QPushButton#memoButton {
     background-color: #334155;
     border-color: #475569;
@@ -156,6 +168,11 @@ QWidget#reviewPreviewContainer[defectMarked="true"] {
 }
 QWidget#reviewPreviewContainer[defectMarked="true"] QCheckBox#defectCheck {
     color: #fca5a5;
+}
+QWidget#reviewPreviewContainer[dragTarget="true"] {
+    border: 2px dashed #22d3ee;
+    border-radius: 9px;
+    background-color: #0f1f33;
 }
 QLabel#reviewCountLabel {
     color: #7dd3fc;
